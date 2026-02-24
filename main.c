@@ -3,6 +3,7 @@
 
 #include <stdlib.h>
 
+#include "trie.h"
 #include "ops.h"
 
 /*
@@ -16,46 +17,7 @@ instructions
 
 */
 
-// read-only at runtime without great effort
-// due to the size of the bitsets, this only works for ascii
-// it won't exactly fail for strings with bytes containing values >127, but it
-// ignores the top bit, so it treats 127 and 255 the same, for example
-// this could work for anything if the bitsets held 256 bits each,
-// and some modifications were made to trie_next_
-typedef struct {
-	uint64_t keys[2];
-	uint64_t terms[2];
-	int next;
-	int data;
-} trie;
-
-// this trie is kinda strange: it keeps a bitset keys and terminals
-// the index of the value of an ascii char is 1 iff that char is in the set
-// to find the link to the next part of the trie, you offset a base trie pointer
-// by next[x], and to find x you count up the number of set bits preceding the
-// found key
-// this function returns the offset from some base trie pointer of the next
-// trie in the chain, or -1 to indicate there is no next part
-int trie_next_(uint64_t keys[2], int next, unsigned char c) {
-	int ik = (c >> 6) & 1; // lo or hi part of keys
-	int frag = c & 63; // bit index of keys[ik]
-	if (((keys[ik] >> frag) & 1) == 0) {
-		return -1;
-	}
-	int in = 0;
-	// ensure popcountl is suitable for u64 (it probably is)
-	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
-	if (ik) {
-		in = __builtin_popcountl(keys[0]);
-	}
-	in += __builtin_popcountl(keys[ik] << (64 - frag));
-	return next + in;
-}
-
-#define trie_next(t, c) trie_next_((t)->keys, (t)->next, c)
-#define trie_term(t, c) trie_next_((t)->terms, (t)->data, c)
-
-void trie_set_key_(uint64_t keys[2], unsigned char c) {
+void trie_set_key(uint64_t keys[2], unsigned char c) {
 	int ik = (c >> 6) & 1;
 	int frag = c & 63;
 	keys[ik] |= ((uint64_t) 1) << frag;
@@ -162,11 +124,11 @@ void gbuf_fill(trie_builder *base) {
 	for (int i = 0; i < base->len; i++) {
 		unsigned char k = base->ents[i]->key;
 		if (base->ents[i]->term) {
-			trie_set_key_(gbuf[n].terms, k);
+			trie_set_key(gbuf[n].terms, k);
 			dp++;
 		}
 		if (base->ents[i]->next->len > 0) {
-			trie_set_key_(gbuf[n].keys, k);
+			trie_set_key(gbuf[n].keys, k);
 			np++;
 		}
 	}
@@ -180,8 +142,10 @@ void gbuf_fill(trie_builder *base) {
 	} else {
 		gbuf[n].data = apos + np;
 	}
+	/*
 	int npsv = np;
 	int dpsv = dp;
+	*/
 	apos += np + dp;
 	np = gbuf[n].next;
 	dp = gbuf[n].data;
@@ -204,6 +168,7 @@ void gbuf_fill(trie_builder *base) {
 		}
 	}
 
+	/*
 	printf("links: ");
 	for (int i = 0; i < npsv; i++) {
 		printf("%d ", aux[gbuf[n].next + i]);
@@ -258,6 +223,7 @@ void gbuf_fill(trie_builder *base) {
 		}
 	}
 	printf("\n");
+	*/
 }
 
 int main() {
@@ -319,7 +285,16 @@ int main() {
 	apos = 0;
 	gbuf_fill(&base);
 
-	printf("trie instr_tbase[] = {\n");
+	printf(
+		"#ifndef INSTRUCTION_TRIE_H\n"
+		"#define INSTRUCTION_TRIE_H\n"
+		"\n"
+		"// This code was auto-generated! Do not modify by hand.\n"
+		"\n"
+		"#include \"trie.h\"\n"
+		"\n"
+		"trie instr_tbase[] = {\n"
+	);
 	for (int i = 0; i <= gpos; i++) {
 		printf("\t{{%luUL,%luUL},{%luUL,%luUL},%d,%d},\n", gbuf[i].keys[0], gbuf[i].keys[1], gbuf[i].terms[0], gbuf[i].terms[1], gbuf[i].next, gbuf[i].data);
 	}
@@ -331,8 +306,13 @@ int main() {
 	for (int i = 0; i < apos; i++) {
 		printf("\t%d,\n", aux[i]);
 	}
-	printf("};\n");
+	printf(
+		"};\n"
+		"\n"
+		"#endif\n"
+	);
 
+	/*
 	trie *tbase = gbuf;
 	trie *t = &tbase[0];
 	char *s = "add";
@@ -365,6 +345,7 @@ int main() {
 		s++;
 		here = next;
 	}
+	*/
 
 	return 0;
 }

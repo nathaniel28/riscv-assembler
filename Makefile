@@ -1,5 +1,15 @@
+SOURCES=main.c trie.c
+OBJS=$(addsuffix .o, $(basename $(notdir $(SOURCES))))
 CFLAGS=-g -Wall -Wextra -pedantic
 LIBS=
 
-main: main.c
-	$(CC) $(CFLAGS) $(LIBS) -o asm main.c
+default: asm
+
+%.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+asm: $(OBJS)
+	$(CC) $(CFLAGS) $(LIBS) $(OBJS) -o $@
+
+clean:
+	rm -f asm *.o
