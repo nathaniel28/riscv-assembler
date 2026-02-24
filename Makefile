@@ -6,7 +6,7 @@ LIBS=
 default: asm
 
 instruction_trie/builder: instruction_trie/main.c
-	$(CC) $(CFLAGS) main.c -o $@
+	$(CC) $(CFLAGS) instruction_trie/main.c -o $@
 
 instruction_trie.h: instruction_trie/builder
 	./instruction_trie/builder > instruction_trie.h
@@ -14,7 +14,7 @@ instruction_trie.h: instruction_trie/builder
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-asm: $(OBJS) instruction_trie.h
+asm: instruction_trie.h $(OBJS)
 	$(CC) $(CFLAGS) $(LIBS) $(OBJS) -o $@
 
 clean:
