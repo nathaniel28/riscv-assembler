@@ -17,6 +17,11 @@ instructions
 */
 
 // read-only at runtime without great effort
+// due to the size of the bitsets, this only works for ascii
+// it won't exactly fail for strings with bytes containing values >127, but it
+// ignores the top bit, so it treats 127 and 255 the same, for example
+// this could work for anything if the bitsets held 256 bits each,
+// and some modifications were made to trie_next_
 typedef struct {
 	uint64_t keys[2];
 	uint64_t terms[2];
@@ -31,37 +36,24 @@ typedef struct {
 // found key
 // this function returns the offset from some base trie pointer of the next
 // trie in the chain, or -1 to indicate there is no next part
-int trie_next(trie *t, unsigned char c) {
+int trie_next_(uint64_t keys[2], int next, unsigned char c) {
 	int ik = (c >> 6) & 1; // lo or hi part of keys
 	int frag = c & 63; // bit index of keys[ik]
-	if (((t->keys[ik] >> frag) & 1) == 0) {
+	if (((keys[ik] >> frag) & 1) == 0) {
 		return -1;
 	}
 	int in = 0;
 	// ensure popcountl is suitable for u64 (it probably is)
 	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
 	if (ik) {
-		in = __builtin_popcountl(t->keys[0]);
+		in = __builtin_popcountl(keys[0]);
 	}
-	in += __builtin_popcountl(t->keys[ik] << (64 - frag));
-	return t->next + in;
+	in += __builtin_popcountl(keys[ik] << (64 - frag));
+	return next + in;
 }
 
-int trie_term(trie *t, unsigned char c) {
-	int ik = (c >> 6) & 1; // lo or hi part of keys
-	int frag = c & 63; // bit index of keys[ik]
-	if (((t->terms[ik] >> frag) & 1) == 0) {
-		return -1;
-	}
-	int in = 0;
-	// ensure popcountl is suitable for u64 (it probably is)
-	static_assert(sizeof(unsigned long) == sizeof(uint64_t));
-	if (ik) {
-		in = __builtin_popcountl(t->terms[0]);
-	}
-	in += __builtin_popcountl(t->terms[ik] << (64 - frag));
-	return t->data + in;
-}
+#define trie_next(t, c) trie_next_((t)->keys, (t)->next, c)
+#define trie_term(t, c) trie_next_((t)->terms, (t)->data, c)
 
 void trie_set_key_(uint64_t keys[2], unsigned char c) {
 	int ik = (c >> 6) & 1;
@@ -163,18 +155,21 @@ void gbuf_fill(trie_builder *base) {
 	int n = gpos;
 	int np = 0;
 	int dp = 0;
-	for (int i = 0; i < base->len; i++) {
-		if (base->ents[i]->term) {
-			dp++;
-		}
-		if (base->ents[i]->next->len > 0) {
-			np++;
-		}
-	}
 	gbuf[n].keys[0] = 0;
 	gbuf[n].keys[1] = 0;
 	gbuf[n].terms[0] = 0;
 	gbuf[n].terms[1] = 0;
+	for (int i = 0; i < base->len; i++) {
+		unsigned char k = base->ents[i]->key;
+		if (base->ents[i]->term) {
+			trie_set_key_(gbuf[n].terms, k);
+			dp++;
+		}
+		if (base->ents[i]->next->len > 0) {
+			trie_set_key_(gbuf[n].keys, k);
+			np++;
+		}
+	}
 	if (np == 0) {
 		gbuf[n].next = 0; // can really be anything
 	} else {
@@ -185,34 +180,84 @@ void gbuf_fill(trie_builder *base) {
 	} else {
 		gbuf[n].data = apos + np;
 	}
+	int npsv = np;
+	int dpsv = dp;
 	apos += np + dp;
 	np = gbuf[n].next;
 	dp = gbuf[n].data;
 	for (int i = 0; i < base->len; i++) {
-		unsigned char k = base->ents[i]->key;
 		if (base->ents[i]->term) {
-			trie_set_key_(gbuf[n].terms, k);
 			aux[dp++] = base->ents[i]->data;
 		}
 		if (base->ents[i]->next->len > 0) {
-			trie_set_key_(gbuf[n].keys, k);
+			unsigned char k = base->ents[i]->key;
+			int ik = (k >> 6) & 1;
+			int frag = k & 63;
+			int in = 0;
+			if (ik) {
+				in = __builtin_popcountl(gbuf[n].keys[0]);
+			}
+			in += __builtin_popcountl(gbuf[n].keys[ik] << (64 - frag));
 			gpos++;
-			aux[np++] = gpos;
+			aux[gbuf[n].next + in] = gpos;
 			gbuf_fill(base->ents[i]->next);
 		}
 	}
 
-	/*
 	printf("links: ");
-	for (int i = 0; i < np; i++) {
-		printf("%d ", gbuf[n].next[i]);
+	for (int i = 0; i < npsv; i++) {
+		printf("%d ", aux[gbuf[n].next + i]);
 	}
 	printf("@ %d: ", n);
 	print_keys_(gbuf[n].keys);
 	printf("/");
 	print_keys_(gbuf[n].terms);
+	printf(" ");
+	for (int i = 0; i < dpsv; i++) {
+		switch (aux[gbuf[n].data + i]) {
+#define C(n) case n: printf("%s ", #n); break
+		C(ADD);
+		C(SUB);
+		C(XOR);
+		C(OR);
+		C(AND);
+		C(SLL);
+		C(SRL);
+		C(SRA);
+		C(SLT);
+		C(SLTU);
+		C(ADDI);
+		C(XORI);
+		C(ORI);
+		C(ANDI);
+		C(SLLI);
+		C(SRLI);
+		C(SRAI);
+		C(SLTI);
+		C(SLTIU);
+		C(LB);
+		C(LH);
+		C(LW);
+		C(LBU);
+		C(LHU);
+		C(SB);
+		C(SH);
+		C(SW);
+		C(BEQ);
+		C(BNE);
+		C(BLT);
+		C(BGE);
+		C(BLTU);
+		C(BGEU);
+		C(JAL);
+		C(JALR);
+		C(LUI);
+		C(AUIPC);
+		C(ECALL);
+		C(EBREAK);
+		}
+	}
 	printf("\n");
-	*/
 }
 
 int main() {
@@ -276,7 +321,7 @@ int main() {
 
 	printf("trie instr_tbase[] = {\n");
 	for (int i = 0; i <= gpos; i++) {
-		printf("\t{{%luL,%luL},{%luL,%luL},%d,%d},\n", gbuf[i].keys[0], gbuf[i].keys[1], gbuf[i].terms[0], gbuf[i].terms[1], gbuf[i].next, gbuf[i].data);
+		printf("\t{{%luUL,%luUL},{%luUL,%luUL},%d,%d},\n", gbuf[i].keys[0], gbuf[i].keys[1], gbuf[i].terms[0], gbuf[i].terms[1], gbuf[i].next, gbuf[i].data);
 	}
 	printf(
 		"};\n"
@@ -287,6 +332,39 @@ int main() {
 		printf("\t%d,\n", aux[i]);
 	}
 	printf("};\n");
+
+	trie *tbase = gbuf;
+	trie *t = &tbase[0];
+	char *s = "add";
+	char here = *s;
+	if (!here) {
+		return 0;
+	}
+	while (1) {
+		printf("seek %c from @ %lu ", here, t - tbase);
+		print_keys_(t->keys);
+		printf("/");
+		print_keys_(t->terms);
+		printf("\n");
+		char next = s[1];
+		if (next == ' ' || next == '\t' || next == '\0') {
+			int termidx = trie_term(t, here);
+			if (termidx < 0) {
+				printf("not found\n");
+			} else {
+				printf("data = %d\n", aux[termidx]);
+			}
+			break;
+		}
+		int nextidx = trie_next(t, here);
+		if (nextidx < 0) {
+			printf("not found (early)\n");
+			break;
+		}
+		t = tbase + aux[nextidx];
+		s++;
+		here = next;
+	}
 
 	return 0;
 }
