@@ -74,8 +74,6 @@ int expect_literal(char **_s, const char *expect, size_t expect_len) {
 		s++;
 		expect++;
 	}
-	if (!whitespace(*s) && !newline(*s) && *s != ',' && *s != '\0')
-		return -1;
 	*_s = s;
 	return 0;
 }
@@ -91,14 +89,9 @@ int parse_reg_long_number(char **_s, uint32_t *result) {
 	char ones = *s++;
 	if (ones < '0' || ones > '9') {
 		// maybe it's x0-x9, so only 1 digit
-		if (!whitespace(ones) && !newline(ones) && ones != ',' && ones != '\0')
-			return -1;
 		s--;
 		ones = tens;
 		tens = '0';
-	} else {
-		if (!whitespace(*s) && !newline(*s) && *s != ',' && *s != '\0')
-			return -1;
 	}
 	*result = 10 * (tens - '0') + (ones - '0');
 	*_s = s;
@@ -177,6 +170,8 @@ int parse_reg(char **_s, uint32_t *r) {
 	default:
 		return -1;
 	}
+	if (!whitespace(*s) && !newline(*s) && *s != ',' && *s != '\0')
+		return -1;
 	*_s = s;
 	return 0;
 }
@@ -259,6 +254,8 @@ unit parse_line(char **_s) {
 }
 */
 
+// NOTE: tests do not cover ensuring a register ending in a comma or whitespace
+// is permissable (ie "x0," or "x0 ")
 int test_parse_reg() {
 	struct {
 		char *in;
@@ -336,6 +333,8 @@ int test_parse_reg() {
 		{ "s12", 0, 0 },
 		{ "a8", 0, 0 },
 		{ "r0", 0, 0 },
+		{ "x20a", 0, 0 },
+		{ "zeroa", 0, 0 },
 		{ "", 0, 0 },
 	};
 	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
