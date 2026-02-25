@@ -1,3 +1,4 @@
+#include <assert.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -33,12 +34,24 @@ x2type = ebreak | ecall
 
 typedef struct {
 	char *begin;
-	int len;
+	size_t len;
 } string;
 
+// BEHOLD: THE STRUCT OF DOOM
 typedef struct {
 	union {
-		uint32_t instruction;
+		struct {
+			// code stores the assembled machine code
+			// it may be incomplete, relying on a future label
+			// if that is the case, imm_assign is not ASSIGN_NONE
+			uint32_t code;
+			enum {
+				ASSIGN_NONE,
+				ASSIGN_U_IMM,
+				ASSIGN_J_IMM,
+			} imm_assign;
+			string label;
+		} instruction;
 		string label;
 		string section;
 	} u;
@@ -99,8 +112,8 @@ int parse_reg_long_number(char **_s, uint32_t *result) {
 }
 
 // consumes:
-// reg = "zero" | "ra" | "sp" | "gp" | "tp" | ( "x" n0t31 ) | ( "t" n0t6 )
-//       | ( "s" n0t11 ) | ( "a" n0t7 )
+// reg = "zero" | "ra" | "sp" | "gp" | "tp" | "fp" | ( "x" n0t31 )
+//       | ( "t" n0t6 ) | ( "s" n0t11 ) | ( "a" n0t7 )
 // where nXtY is "X" | "X + 1" | ... | "Y - 1" | "Y"
 // permits 0X as an alternative to X: x09 equals x9, t02 equals t2, etc.
 // writes the register number (0..31, inclusive) to r
@@ -167,6 +180,11 @@ int parse_reg(char **_s, uint32_t *r) {
 		res += 10;
 		*r = res;
 		break;
+	case 'f':
+		if (EXPECT_LITERAL(&s, "p"))
+			return -1;
+		*r = 8;
+		break;
 	default:
 		return -1;
 	}
@@ -176,7 +194,7 @@ int parse_reg(char **_s, uint32_t *r) {
 	return 0;
 }
 
-int parse_imm(char **_s, uint32_t *imm) {
+int parse_imm(char **_s, long long *imm) {
 	char *s = *_s;
 	char *end;
 	long long res = strtoll(s, &end, 0);
@@ -194,6 +212,14 @@ int parse_imm(char **_s, uint32_t *imm) {
 	*imm = res;
 	*_s = s;
 	return 0;
+}
+
+int parse_identifier(char **_s, char **begin, char **end) {
+	(void) _s;
+	(void) begin;
+	(void) end;
+	// TODO
+	return -1;
 }
 
 int parse_reg_reg_reg(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *r2) {
@@ -221,6 +247,7 @@ int parse_reg_reg_reg(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *r2) {
 	return 0;
 }
 
+// this is only used for instructions with 11-bit immidiates
 // caller should validate *imm is small enough to be used by their instruction
 int parse_reg_reg_imm(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *imm) {
 	char *s = *_s;
@@ -240,19 +267,221 @@ int parse_reg_reg_imm(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *imm) {
 		return -1;
 
 	skip_whitespace(&s);
-	if (parse_imm(&s, imm))
+	long long res;
+	if (parse_imm(&s, &res))
+		return -1;
+	if (res >= 2048 || res < -2048)
+		return -1;
+	*imm = res; // TODO: validate demotion from (signed!) ll to u32
+
+	*_s = s;
+	return 0;
+}
+
+// this is only used for instructions with 11-bit immidiates
+// the load/stores: lb, lh, lw, lbu, lhu, sb, sh, sw
+int parse_ls_reg_imm_reg(char **_s, uint32_t *r0, uint32_t *imm, uint32_t *r1) {
+	char *s = *_s;
+	if (parse_reg(&s, r0))
+		return -1;
+
+	skip_whitespace(&s);
+	if (*s++ != ',')
+		return -1;
+
+	skip_whitespace(&s);
+	long long res;
+	if (parse_imm(&s, &res))
+		return -1;
+	if (res >= 2048 || res < -2048)
+		return -1;
+	*imm = res; // TODO: validate demotion from (signed!) ll to u32
+
+	skip_whitespace(&s);
+	if (*s++ != '(')
+		return -1;
+
+	skip_whitespace(&s);
+	if (parse_reg(&s, r1))
+		return -1;
+
+	skip_whitespace(&s);
+	if (*s++ != ')')
 		return -1;
 
 	*_s = s;
 	return 0;
 }
 
-/*
-// *_s is *optionally* null-terminated
-// *_s *must be* '\n'-terminated
-unit parse_line(char **_s) {
+void print_keys_(uint64_t keys[2]) {
+	uint64_t x = keys[0];
+	for (int i = 0; i < 64; i++) {
+		if (x & 1) {
+			printf("%c", i);
+		}
+		x >>= 1;
+	}
+	x = keys[1];
+	for (int i = 0; i < 64; i++) {
+		if (x & 1) {
+			printf("%c", i + 64);
+		}
+		x >>= 1;
+	}
 }
-*/
+
+// TODO: eventually, obey the following (currently no \n is required but \0 is)
+// *_s is *optionally* null-terminated
+// *_s *must have* at least one '\n'
+unit parse_line(char **_s) {
+	const unit err_unit = {
+		.type = UTYPE_ERROR
+	};
+	char *id_start, *id_end;
+
+	char *s = *_s;
+
+	skip_whitespace(&s);
+	char *rewind = s; // go back here to parse as another kind of line
+
+	// try parsing as an instruction
+	trie *pos = &instr_tbase[0];
+	char here = *s++;
+	for (;;) {
+		char next = *s;
+		if (whitespace(next) || newline(next) || next == '\0') {
+			int termidx = trie_term(pos, here);
+			if (termidx < 0)
+				break; // it's not an instruction, try again
+
+			skip_whitespace(&s);
+
+			int operation = instr_tbase_auxiliary[termidx];
+			assert(operation < N_OPS && operation >= 0);
+
+			uint32_t t0, t1, t2;
+
+			unit u;
+
+			uint32_t instr = opcodes[operation];
+			switch (formats[operation]) {
+			case R_TYPE:
+				if (parse_reg_reg_reg(&s, &t0, &t1, &t2))
+					return err_unit;
+				instr |= t0 << 7; // rd
+				instr |= t1 << 15; // rs1
+				instr |= t2 << 20; // rs2
+				instr |= (uint32_t) func3s[operation] << 12;
+				instr |= (uint32_t) func7s[operation] << 25;
+				break;
+			case I_TYPE:
+				if (parse_reg_reg_imm(&s, &t0, &t1, &t2))
+					return err_unit;
+				instr |= t0 << 7; // rd
+				instr |= t1 << 15; // rs1
+				instr |= t2 << 20; // imm
+				instr |= (uint32_t) func3s[operation] << 12;
+				break;
+			case S_TYPE:
+				/*
+				if (parse_ls_reg_imm_reg(&s, &t0, &t1, &t2))
+					return err_unit;
+				*/
+				// TODO
+			case B_TYPE:
+				// TODO
+			case U_TYPE:
+				// TODO
+			case J_TYPE:
+				// TODO
+			default:
+				// default should never occur
+				printf("error: invalid format buffer\n");
+				assert(0);
+			}
+
+			skip_whitespace(&s);
+			if (*s != '\n' && *s != '\0')
+				return err_unit;
+
+			u.u.instruction.code = instr;
+			u.type = UTYPE_INSTRUCTION;
+			*_s = s;
+			return u;
+		}
+		int nextidx = trie_next(pos, here);
+		if (nextidx < 0)
+			break; // not an instruction
+		pos = instr_tbase + instr_tbase_auxiliary[nextidx];
+		s++;
+		here = next;
+	}
+
+	s = rewind;
+
+	// not an instruction, try parsing as a section or data entry
+	// could be .string, .word, .text, .data, etc.
+	if (*s == '.') {
+		s++;
+		// TODO
+	}
+
+	s = rewind;
+
+	// not an instruction/section/data entry, better be a label
+	if (parse_identifier(&s, &id_start, &id_end))
+		return err_unit;
+
+	skip_whitespace(&s);
+	if (*s++ != ':')
+		return err_unit;
+
+	skip_whitespace(&s);
+	if (*s++ != '\n')
+		return err_unit;
+
+	*_s = s;
+	return (unit) {
+		.u = { .label = { id_start, id_end - id_start } },
+		.type = UTYPE_LABEL
+	};
+}
+
+int test_parse_line() {
+	struct {
+		char *in;
+		uint32_t res;
+		_Bool ok;
+	} T[] = {
+		{ "add x0, x1, x2", 0x00208033, 1 },
+		{ "sub x3, x4, x5", 0x405201b3, 1 },
+		{ "xor x6, x7, x8", 0x0083c333, 1 },
+		{ "or x9, x10, x11", 0x00b564b3, 1 },
+		{ "and x12, x13, x14", 0x00e6f633, 1 },
+		{ "sll x15, x16, x17", 0x011817b3, 1 },
+		{ "srl x18, x19, x20", 0x0149d933, 1 },
+		{ "sra x21, x22, x23", 0x417b5ab3, 1 },
+		{ "slt x24, x25, x26", 0x01acac33, 1 },
+		{ "sltu x27, x28, x29", 0x01de3db3, 1 },
+	};
+	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
+		char *pos = T[i].in;
+		unit res = parse_line(&pos);
+		if (res.type == UTYPE_ERROR && T[i].ok) {
+			printf("failed test %ld (%s): fail/success mismatch\n", i, T[i].in);
+			return 1;
+		}
+		if (res.type == UTYPE_INSTRUCTION && T[i].res != res.u.instruction.code) {
+			printf("failed test %ld (%s): expect\n%032b, got\n%032b\n", i, T[i].in, T[i].res, res.u.instruction.code);
+			return 1;
+		}
+		if (T[i].ok && *pos != '\0') {
+			printf("failed test %ld (%s): bad advancement\n", i, T[i].in);
+			return 1;
+		}
+	}
+	return 0;
+}
 
 // NOTE: tests do not cover ensuring a register ending in a comma or whitespace
 // is permissable (ie "x0," or "x0 ")
@@ -299,6 +528,7 @@ int test_parse_reg() {
 		{ "sp", 2, 1 },
 		{ "gp", 3, 1 },
 		{ "tp", 4, 1 },
+		{ "fp", 8, 1 },
 		{ "t0", 5, 1 },
 		{ "t1", 6, 1 },
 		{ "t2", 7, 1 },
@@ -358,6 +588,7 @@ int test_parse_reg() {
 }
 
 int main() {
+	test_parse_line();
 	test_parse_reg();
 	/*
 	char *test = (
