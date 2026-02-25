@@ -296,7 +296,6 @@ int parse_ls_reg_imm_reg(char **_s, uint32_t *r0, uint32_t *imm, uint32_t *r1) {
 	return 0;
 }
 
-// TODO: eventually, obey the following (currently no \n is required but \0 is)
 // *_s is *optionally* null-terminated
 // *_s *must have* at least one '\n'
 unit parse_line(char **_s) {
@@ -324,6 +323,7 @@ unit parse_line(char **_s) {
 			assert(operation < N_OPS && operation >= 0);
 
 			uint32_t t0, t1, t2;
+			long long ibuf;
 
 			unit u;
 
@@ -340,6 +340,12 @@ unit parse_line(char **_s) {
 				break;
 			case I_TYPE:
 				switch (operation) {
+				case ECALL:
+					t0 = 0, t1 = 0, t2 = 0;
+					break;
+				case EBREAK:
+					t0 = 0, t1 = 0, t2 = 1;
+					break;
 				case LB:
 				case LH:
 				case LW:
@@ -380,7 +386,16 @@ unit parse_line(char **_s) {
 			case B_TYPE:
 				// TODO
 			case U_TYPE:
-				// TODO
+				if (
+					parse_reg(&s, &t0)
+					|| expect_char_literal(&s, ',')
+					|| parse_imm(&s, &ibuf)
+					|| ibuf >= 1048576 || ibuf < 0
+				)
+					return err_unit;
+				instr |= t0 << 7; // rd
+				instr |= (uint32_t) ibuf << 12;
+				break;
 			case J_TYPE:
 				// TODO
 			default:
@@ -390,7 +405,7 @@ unit parse_line(char **_s) {
 			}
 
 			skip_whitespace(&s);
-			if (*s != '\n' && *s != '\0')
+			if (!newline(*s) && *s != '\0')
 				return err_unit;
 
 			u.u.instruction.code = instr;
@@ -418,15 +433,14 @@ unit parse_line(char **_s) {
 	s = rewind;
 
 	// not an instruction/section/data entry, better be a label
-	if (parse_identifier(&s, &id_start, &id_end))
+	if (
+		parse_identifier(&s, &id_start, &id_end)
+		|| expect_char_literal(&s, ':')
+	)
 		return err_unit;
 
 	skip_whitespace(&s);
-	if (*s++ != ':')
-		return err_unit;
-
-	skip_whitespace(&s);
-	if (*s++ != '\n')
+	if (!newline(*s) && *s != '\0')
 		return err_unit;
 
 	*_s = s;
@@ -470,15 +484,12 @@ int test_parse_line() {
 		{ "sb a2, -683(a7)", 0xd4c88aa3, 1 },
 		{ "sh a2, -1(a7)", 0xfec89fa3, 1 },
 		{ "sw a2, 1365(a7)", 0x54c8aaa3, 1 },
-		/*
 		{ "lui a1, 1048575", 0xfffff5b7, 1 },
-		{ "auipc t6, -1", 0xffffff97, 1 },
+		{ "auipc t6, 1048575", 0xffffff97, 1 },
 		{ "ecall", 0x00000073, 1 },
 		{ "ebreak", 0x00100073, 1 },
-		*/
 	};
-	// TODO: TEMPORARY: start i at 19
-	for (size_t i = 19; i < sizeof T / sizeof *T; i++) {
+	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
 		char *pos = T[i].in;
 		unit res = parse_line(&pos);
 		if (res.type == UTYPE_ERROR && T[i].ok) {
@@ -490,7 +501,7 @@ int test_parse_line() {
 			return 1;
 		}
 		if (T[i].ok && *pos != '\0') {
-			printf("failed test %ld (%s): bad advancement\n", i, T[i].in);
+			printf("failed test %ld (%s): bad advancement (%s)\n", i, T[i].in, pos);
 			return 1;
 		}
 	}
