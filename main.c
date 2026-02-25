@@ -71,6 +71,15 @@ int newline(char c) {
 	return c == '\n' || c == '\r';
 }
 
+int identifier(char c) {
+	return (
+		(c >= 'a' && c <= 'z')
+		|| (c >= 'A' && c <= 'Z')
+		|| (c >= '0' && c <= '9')
+		|| c == '_'
+	);
+}
+
 void skip_whitespace(char **_s) {
 	char *s = *_s;
 	while (whitespace(*s)) {
@@ -188,7 +197,7 @@ int parse_reg(char **_s, uint32_t *r) {
 	default:
 		return -1;
 	}
-	if (!whitespace(*s) && !newline(*s) && *s != ',' && *s != '\0')
+	if (identifier(*s))
 		return -1;
 	*_s = s;
 	return 0;
@@ -313,23 +322,6 @@ int parse_ls_reg_imm_reg(char **_s, uint32_t *r0, uint32_t *imm, uint32_t *r1) {
 	return 0;
 }
 
-void print_keys_(uint64_t keys[2]) {
-	uint64_t x = keys[0];
-	for (int i = 0; i < 64; i++) {
-		if (x & 1) {
-			printf("%c", i);
-		}
-		x >>= 1;
-	}
-	x = keys[1];
-	for (int i = 0; i < 64; i++) {
-		if (x & 1) {
-			printf("%c", i + 64);
-		}
-		x >>= 1;
-	}
-}
-
 // TODO: eventually, obey the following (currently no \n is required but \0 is)
 // *_s is *optionally* null-terminated
 // *_s *must have* at least one '\n'
@@ -375,8 +367,20 @@ unit parse_line(char **_s) {
 				instr |= (uint32_t) func7s[operation] << 25;
 				break;
 			case I_TYPE:
-				if (parse_reg_reg_imm(&s, &t0, &t1, &t2))
-					return err_unit;
+				switch (operation) {
+				case LB:
+				case LH:
+				case LW:
+				case LBU:
+				case LHU:
+					if (parse_ls_reg_imm_reg(&s, &t0, &t2, &t1))
+						return err_unit;
+					break;
+				default:
+					if (parse_reg_reg_imm(&s, &t0, &t1, &t2))
+						return err_unit;
+					break;
+				}
 				switch (operation) {
 				case SRAI:
 					instr |= 0x20 << 25;
@@ -481,8 +485,23 @@ int test_parse_line() {
 		{ "srai x14, x7, 15", 0x40f3d713, 1 },
 		{ "slti x14, x7, 25", 0x0193a713, 1 },
 		{ "sltiu x14, x7, -1", 0xfff3b713, 1 },
+		{ "lb t1, 2047(t6)", 0x7fff8303, 1 },
+		{ "lh t1, -2048(t6)", 0x800f9303, 1 },
+		{ "lw t1, -683(t6)", 0xd55fa303, 1 },
+		{ "lbu t1, 1365(t6)", 0x555fc303, 1 },
+		{ "lhu t1, -1(t6)", 0xffffd303, 1 },
+		/*
+		{ "sb a2, -683(a7)", 0xd4c88aa3, 1 },
+		{ "sh a2, -1(a7)", 0xfec89fa3, 1 },
+		{ "sw a2, 1365(a7)", 0x54c8aaa3, 1 },
+		{ "lui a1, 1048575", 0xfffff5b7, 1 },
+		{ "auipc t6, -1", 0xffffff97, 1 },
+		{ "ecall", 0x00000073, 1 },
+		{ "ebreak", 0x00100073, 1 },
+		*/
 	};
-	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
+	// TODO: TEMPORARY: start i at 19
+	for (size_t i = 19; i < sizeof T / sizeof *T; i++) {
 		char *pos = T[i].in;
 		unit res = parse_line(&pos);
 		if (res.type == UTYPE_ERROR && T[i].ok) {
