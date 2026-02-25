@@ -70,14 +70,14 @@ void print_keys_(uint64_t keys[2]) {
 	uint64_t x = keys[0];
 	for (int i = 0; i < 64; i++) {
 		if (x & 1) {
-			printf("%c", i);
+			fprintf(stderr, "%c", i);
 		}
 		x >>= 1;
 	}
 	x = keys[1];
 	for (int i = 0; i < 64; i++) {
 		if (x & 1) {
-			printf("%c", i + 64);
+			fprintf(stderr, "%c", i + 64);
 		}
 		x >>= 1;
 	}
@@ -130,16 +130,24 @@ void gbuf_fill(trie_builder *base) {
 	} else {
 		gbuf[n].data = apos + np;
 	}
-	/*
 	int npsv = np;
 	int dpsv = dp;
-	*/
+	(void) npsv;
+	(void) dpsv;
 	apos += np + dp;
 	np = gbuf[n].next;
 	dp = gbuf[n].data;
 	for (int i = 0; i < base->len; i++) {
 		if (base->ents[i]->term) {
-			aux[dp++] = base->ents[i]->data;
+			unsigned char k = base->ents[i]->key;
+			int ik = (k >> 6) & 1;
+			int frag = k & 63;
+			int in = 0;
+			if (ik) {
+				in = __builtin_popcountl(gbuf[n].terms[0]);
+			}
+			in += __builtin_popcountl(gbuf[n].terms[ik] << (64 - frag));
+			aux[gbuf[n].data + in] = base->ents[i]->data;
 		}
 		if (base->ents[i]->next->len > 0) {
 			unsigned char k = base->ents[i]->key;
@@ -157,18 +165,18 @@ void gbuf_fill(trie_builder *base) {
 	}
 
 	/*
-	printf("links: ");
+	fprintf(stderr, "links: ");
 	for (int i = 0; i < npsv; i++) {
-		printf("%d ", aux[gbuf[n].next + i]);
+		fprintf(stderr, "%d ", aux[gbuf[n].next + i]);
 	}
-	printf("@ %d: ", n);
+	fprintf(stderr, "@ %d: ", n);
 	print_keys_(gbuf[n].keys);
-	printf("/");
+	fprintf(stderr, "/");
 	print_keys_(gbuf[n].terms);
-	printf(" ");
+	fprintf(stderr, " ");
 	for (int i = 0; i < dpsv; i++) {
 		switch (aux[gbuf[n].data + i]) {
-#define C(n) case n: printf("%s ", #n); break
+#define C(n) case n: fprintf(stderr, "%s ", #n); break
 		C(ADD);
 		C(SUB);
 		C(XOR);
@@ -210,7 +218,7 @@ void gbuf_fill(trie_builder *base) {
 		C(EBREAK);
 		}
 	}
-	printf("\n");
+	fprintf(stderr, "\n");
 	*/
 }
 
