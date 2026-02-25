@@ -100,6 +100,16 @@ int expect_literal(char **_s, const char *expect, size_t expect_len) {
 	return 0;
 }
 
+// unlike expect_literal, this consumes leading whitespace
+int expect_char_literal(char **_s, char c) {
+	char *s = *_s;
+	skip_whitespace(&s);
+	if (*s++ != c)
+		return -1;
+	*_s = s;
+	return 0;
+}
+
 // when expect is a c-string literal
 #define EXPECT_LITERAL(_s, expect) expect_literal(_s, expect, sizeof(expect) - 1)
 
@@ -120,7 +130,7 @@ int parse_reg_long_number(char **_s, uint32_t *result) {
 	return 0;
 }
 
-// consumes:
+// consumes leading whitespace and
 // reg = "zero" | "ra" | "sp" | "gp" | "tp" | "fp" | ( "x" n0t31 )
 //       | ( "t" n0t6 ) | ( "s" n0t11 ) | ( "a" n0t7 )
 // where nXtY is "X" | "X + 1" | ... | "Y - 1" | "Y"
@@ -128,6 +138,7 @@ int parse_reg_long_number(char **_s, uint32_t *result) {
 // writes the register number (0..31, inclusive) to r
 int parse_reg(char **_s, uint32_t *r) {
 	char *s = *_s;
+	skip_whitespace(&s);
 	uint32_t res;
 	switch (*s++) {
 	case 'x':
@@ -203,6 +214,7 @@ int parse_reg(char **_s, uint32_t *r) {
 	return 0;
 }
 
+// consumes leading whitespace and an integer in hex/octal/decimal
 int parse_imm(char **_s, long long *imm) {
 	char *s = *_s;
 	char *end;
@@ -233,25 +245,14 @@ int parse_identifier(char **_s, char **begin, char **end) {
 
 int parse_reg_reg_reg(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *r2) {
 	char *s = *_s;
-	if (parse_reg(&s, r0))
+	if (
+		parse_reg(&s, r0)
+		|| expect_char_literal(&s, ',')
+		|| parse_reg(&s, r1)
+		|| expect_char_literal(&s, ',')
+		|| parse_reg(&s, r2)
+	)
 		return -1;
-
-	skip_whitespace(&s);
-	if (*s++ != ',')
-		return -1;
-
-	skip_whitespace(&s);
-	if (parse_reg(&s, r1))
-		return -1;
-
-	skip_whitespace(&s);
-	if (*s++ != ',')
-		return -1;
-
-	skip_whitespace(&s);
-	if (parse_reg(&s, r2))
-		return -1;
-
 	*_s = s;
 	return 0;
 }
@@ -260,29 +261,17 @@ int parse_reg_reg_reg(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *r2) {
 // caller should validate *imm is small enough to be used by their instruction
 int parse_reg_reg_imm(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *imm) {
 	char *s = *_s;
-	if (parse_reg(&s, r0))
-		return -1;
-
-	skip_whitespace(&s);
-	if (*s++ != ',')
-		return -1;
-
-	skip_whitespace(&s);
-	if (parse_reg(&s, r1))
-		return -1;
-
-	skip_whitespace(&s);
-	if (*s++ != ',')
-		return -1;
-
-	skip_whitespace(&s);
 	long long res;
-	if (parse_imm(&s, &res))
-		return -1;
-	if (res >= 2048 || res < -2048)
+	if (
+		parse_reg(&s, r0)
+		|| expect_char_literal(&s, ',')
+		|| parse_reg(&s, r1)
+		|| expect_char_literal(&s, ',')
+		|| parse_imm(&s, &res)
+		|| res >= 2048 || res < -2048
+	)
 		return -1;
 	*imm = res; // TODO: validate demotion from (signed!) ll to u32
-
 	*_s = s;
 	return 0;
 }
@@ -291,33 +280,18 @@ int parse_reg_reg_imm(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *imm) {
 // the load/stores: lb, lh, lw, lbu, lhu, sb, sh, sw
 int parse_ls_reg_imm_reg(char **_s, uint32_t *r0, uint32_t *imm, uint32_t *r1) {
 	char *s = *_s;
-	if (parse_reg(&s, r0))
-		return -1;
-
-	skip_whitespace(&s);
-	if (*s++ != ',')
-		return -1;
-
-	skip_whitespace(&s);
 	long long res;
-	if (parse_imm(&s, &res))
-		return -1;
-	if (res >= 2048 || res < -2048)
+	if (
+		parse_reg(&s, r0)
+		|| expect_char_literal(&s, ',')
+		|| parse_imm(&s, &res)
+		|| res >= 2048 || res < -2048
+		|| expect_char_literal(&s, '(')
+		|| parse_reg(&s, r1)
+		|| expect_char_literal(&s, ')')
+	)
 		return -1;
 	*imm = res; // TODO: validate demotion from (signed!) ll to u32
-
-	skip_whitespace(&s);
-	if (*s++ != '(')
-		return -1;
-
-	skip_whitespace(&s);
-	if (parse_reg(&s, r1))
-		return -1;
-
-	skip_whitespace(&s);
-	if (*s++ != ')')
-		return -1;
-
 	*_s = s;
 	return 0;
 }
@@ -341,12 +315,10 @@ unit parse_line(char **_s) {
 	char here = *s++;
 	for (;;) {
 		char next = *s;
-		if (whitespace(next) || newline(next) || next == '\0') {
+		if (!identifier(next)) {
 			int termidx = trie_term(pos, here);
 			if (termidx < 0)
 				break; // it's not an instruction, try again
-
-			skip_whitespace(&s);
 
 			int operation = instr_tbase_auxiliary[termidx];
 			assert(operation < N_OPS && operation >= 0);
@@ -373,6 +345,7 @@ unit parse_line(char **_s) {
 				case LW:
 				case LBU:
 				case LHU:
+					// note order of t0, t1, t2
 					if (parse_ls_reg_imm_reg(&s, &t0, &t2, &t1))
 						return err_unit;
 					break;
@@ -396,11 +369,14 @@ unit parse_line(char **_s) {
 				instr |= (uint32_t) func3s[operation] << 12;
 				break;
 			case S_TYPE:
-				/*
 				if (parse_ls_reg_imm_reg(&s, &t0, &t1, &t2))
 					return err_unit;
-				*/
-				// TODO
+				instr |= t2 << 15; // rs1
+				instr |= t0 << 20; // rs2
+				instr |= (t1 & 0xfe0) << 20; // imm[11:5]
+				instr |= (t1 & 0x1f) << 7; // imm[4:0]
+				instr |= (uint32_t) func3s[operation] << 12;
+				break;
 			case B_TYPE:
 				// TODO
 			case U_TYPE:
@@ -466,6 +442,7 @@ int test_parse_line() {
 		uint32_t res;
 		_Bool ok;
 	} T[] = {
+		{ " \t\t add \t  x0   ,\t  x1  \t,   x2  ", 0x00208033, 1 },
 		{ "add x0, x1, x2", 0x00208033, 1 },
 		{ "sub x3, x4, x5", 0x405201b3, 1 },
 		{ "xor x6, x7, x8", 0x0083c333, 1 },
@@ -490,10 +467,10 @@ int test_parse_line() {
 		{ "lw t1, -683(t6)", 0xd55fa303, 1 },
 		{ "lbu t1, 1365(t6)", 0x555fc303, 1 },
 		{ "lhu t1, -1(t6)", 0xffffd303, 1 },
-		/*
 		{ "sb a2, -683(a7)", 0xd4c88aa3, 1 },
 		{ "sh a2, -1(a7)", 0xfec89fa3, 1 },
 		{ "sw a2, 1365(a7)", 0x54c8aaa3, 1 },
+		/*
 		{ "lui a1, 1048575", 0xfffff5b7, 1 },
 		{ "auipc t6, -1", 0xffffff97, 1 },
 		{ "ecall", 0x00000073, 1 },
