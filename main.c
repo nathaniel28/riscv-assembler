@@ -210,7 +210,7 @@ int parse_imm(char **_s, long long *imm) {
 	)
 		return -1;
 	*imm = res;
-	*_s = s;
+	*_s = end;
 	return 0;
 }
 
@@ -377,6 +377,15 @@ unit parse_line(char **_s) {
 			case I_TYPE:
 				if (parse_reg_reg_imm(&s, &t0, &t1, &t2))
 					return err_unit;
+				switch (operation) {
+				case SRAI:
+					instr |= 0x20 << 25;
+					// fallthrough
+				case SLLI:
+				case SRLI:
+					if (t2 > 31)
+						return err_unit;
+				}
 				instr |= t0 << 7; // rd
 				instr |= t1 << 15; // rs1
 				instr |= t2 << 20; // imm
@@ -463,6 +472,15 @@ int test_parse_line() {
 		{ "sra x21, x22, x23", 0x417b5ab3, 1 },
 		{ "slt x24, x25, x26", 0x01acac33, 1 },
 		{ "sltu x27, x28, x29", 0x01de3db3, 1 },
+		{ "addi x30, x31, -2048", 0x800f8f13, 1 },
+		{ "xori x14, x7, 2047", 0x7ff3c713, 1 },
+		{ "ori x14, x7, -683", 0xd553e713, 1 },
+		{ "andi x14, x7, 1365", 0x5553f713, 1 },
+		{ "slli x14, x7, 31", 0x01f39713, 1 },
+		{ "srli x14, x7, 0", 0x0003d713, 1 },
+		{ "srai x14, x7, 15", 0x40f3d713, 1 },
+		{ "slti x14, x7, 25", 0x0193a713, 1 },
+		{ "sltiu x14, x7, -1", 0xfff3b713, 1 },
 	};
 	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
 		char *pos = T[i].in;
