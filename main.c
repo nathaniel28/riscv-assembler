@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 #include "trie.h"
 #include "ops.h"
@@ -16,9 +18,52 @@
 
 const char *const no_mem = "memory allocation failed";
 
+const char *const bad_write = "write call failed";
+
 [[noreturn]] void panic(const char *const msg) {
 	puts(msg);
 	exit(-1);
+}
+
+enum {
+	SECT_TEXT,
+	SECT_DATA,
+	N_SECTIONS,
+} section;
+
+typedef struct {
+	uint8_t section_buf[N_SECTIONS][4096];
+	struct {
+		int len;
+		int pos;
+		int swap;
+	} section[N_SECTIONS];
+	int current_section;
+} emitter;
+
+// write the contents of a buffer to a file to make room for more stuff
+void emitter_clear_buffer(emitter *em, int sect) {
+	if (write(em->section[sect].swap, em->section_buf[sect], em->section[sect].len) != em->section[sect].len)
+		panic(bad_write);
+	em->section[sect].len = 0;
+}
+
+// buffer some data
+void emitter_buffer(emitter *em, void *data, size_t len) {
+	// for fewer copies, we could check if len > the buffer size
+	// and if it is, write directly from data instead of copying data
+	// to the buffer and writing from there
+	int sect = em->current_section;
+	size_t pos = em->section[sect].len;
+	while (pos + len >= sizeof em->section_buf[0]) {
+		size_t copy = sizeof(em->section_buf[0]) - pos;
+		memcpy(&em->section_buf[sect][pos], data, copy);
+		emitter_clear_buffer(em, sect);
+		data = (uint8_t *) data + copy;
+		len -= copy;
+		pos = 0;
+	}
+	memcpy(&em->section_buf[sect][pos], data, len);
 }
 
 typedef struct {
@@ -26,60 +71,14 @@ typedef struct {
 	size_t len;
 } string;
 
-// BEHOLD: THE STRUCT OF DOOM
-typedef struct {
-	union {
-		// UTYPE_INSTRUCTION
-		struct {
-			// code stores the assembled machine code
-			// it may be incomplete, relying on a future label
-			// if that is the case, imm_assign is not ASSIGN_NONE
-			uint32_t code;
-			enum assign_type {
-				ASSIGN_NONE,
-				ASSIGN_U_IMM,
-				ASSIGN_J_IMM,
-			} imm_assign;
-			string label;
-		} instruction;
-
-		// yes, I'm aware of there being duplicate types in this union
-		// they correspond to different UTYPEs and I didn't want to have
-		// int int_data; string string_data;
-
-		// UTYPE_LABEL
-		// view of part of the string being parsed; no need to free
-		string label;
-
-		// UTYPE_ASCII
-		// also a view
-		string strdata;
-
-		// UTYPE_SPACE
-		int space;
-	} u;
-	enum {
-		/*
-		UTYPE_BYTES = K_BYTE,
-		UTYPE_HALVES = K_HALF,
-		UTYPE_WORDS = K_WORD,
-		UTYPE_DWORDS = K_DWORD,
-		UTYPE_ASCII = K_ASCII,
-		UTYPE_SPACE = K_SPACE,
-		UTYPE_TEXT = K_TEXT,
-		UTYPE_DATA = K_DATA,
-		*/
-		UTYPE_INSTRUCTION = N_DIRECTIVES,
-		UTYPE_LABEL,
-		UTYPE_ERROR,
-	} type; // type enum directive is allowed to be assigned to this field
-} unit;
-
 /*
 typedef struct {
 	int fix_idx; // offset into text section of instruction that needs the
 		     // immediate
-	enum assign_type assign;
+	enum {
+		ASSIGN_UTYPE,
+		ASSIGN_JTYPE,
+	} assign;
 } label_waiter;
 
 typedef struct {
@@ -118,7 +117,7 @@ int labels_add(labels *l, string key, uint32_t val) {
 	return 0;
 }
 
-int64_t label_get_or_wait(labels *l, uint32_t *wait_dst, enum assign_type wait_assign) {
+int64_t label_get_or_add_waiter(labels *l, uint32_t *wait_dst, enum assign_type wait_assign) {
 }
 */
 
@@ -362,13 +361,10 @@ int parse_ls_reg_imm_reg(char **_s, uint32_t *r0, uint32_t *imm, uint32_t *r1) {
 
 // *_s is *optionally* null-terminated
 // *_s *must have* at least one '\n'
-unit parse_line(char **_s) {
-	const unit err_unit = {
-		.type = UTYPE_ERROR
-	};
-	char *id_start, *id_end;
-	unit u;
-
+// returns NULL if no error occured
+// otherwise, returns a string with a description of the error that may be
+// presented to the user
+char *parse_line(char **_s, emitter *em) {
 	char *s = *_s;
 
 	skip_whitespace(&s);
@@ -390,9 +386,6 @@ unit parse_line(char **_s) {
 
 			// check if it's a directive
 			// TODO
-			// u.type should be operation if any of the cases in
-			// the next switch are used
-			u.type = operation;
 			switch (operation) {
 			case K_BYTE:
 			case K_HALF:
@@ -409,8 +402,7 @@ unit parse_line(char **_s) {
 					parse_imm(&s, &ibuf)
 					|| ibuf >= 4294967296LL || ibuf < 0
 				)
-					return err_unit;
-				u.u.space = ibuf;
+					return "immediate out of range";
 				goto out_check_line;
 			}
 
@@ -420,13 +412,11 @@ unit parse_line(char **_s) {
 
 			uint32_t t0, t1, t2;
 
-			u.u.instruction.imm_assign = ASSIGN_NONE;
-
 			uint32_t instr = opcodes[operation];
 			switch (formats[operation]) {
 			case R_TYPE:
 				if (parse_reg_reg_reg(&s, &t0, &t1, &t2))
-					return err_unit;
+					return "could not parse required register, register, register for this operation";
 				instr |= t0 << 7; // rd
 				instr |= t1 << 15; // rs1
 				instr |= t2 << 20; // rs2
@@ -448,11 +438,11 @@ unit parse_line(char **_s) {
 				case LHU:
 					// note order of t0, t1, t2
 					if (parse_ls_reg_imm_reg(&s, &t0, &t2, &t1))
-						return err_unit;
+						return "could not parse required register, immediate(register) required for this operation";
 					break;
 				default:
 					if (parse_reg_reg_imm(&s, &t0, &t1, &t2))
-						return err_unit;
+						return "could not parse required register, register, immediate for this operation";
 					break;
 				}
 				switch (operation) {
@@ -462,7 +452,7 @@ unit parse_line(char **_s) {
 				case SLLI:
 				case SRLI:
 					if (t2 > 31)
-						return err_unit;
+						return "immediate out of range for shift operation";
 				}
 				instr |= t0 << 7; // rd
 				instr |= t1 << 15; // rs1
@@ -471,7 +461,7 @@ unit parse_line(char **_s) {
 				break;
 			case S_TYPE:
 				if (parse_ls_reg_imm_reg(&s, &t0, &t1, &t2))
-					return err_unit;
+					return "could not parse required register, immediate(register) required for this operation";
 				instr |= t2 << 15; // rs1
 				instr |= t0 << 20; // rs2
 				instr |= (t1 & 0xfe0) << 20; // imm[11:5]
@@ -480,6 +470,7 @@ unit parse_line(char **_s) {
 				break;
 			case B_TYPE:
 				// TODO
+				assert(0);
 			case U_TYPE:
 				if (
 					parse_reg(&s, &t0)
@@ -487,21 +478,19 @@ unit parse_line(char **_s) {
 					|| parse_imm(&s, &ibuf)
 					|| ibuf >= 1048576 || ibuf < 0
 				)
-					return err_unit;
+					return "could not parse required register, immediate required for this operation";
 				instr |= t0 << 7; // rd
 				instr |= (uint32_t) ibuf << 12;
 				break;
 			case J_TYPE:
 				// TODO
+				assert(0);
 			default:
 				// default should never occur
 				printf("error: invalid format buffer\n");
 				assert(0);
 			}
-
-			u.u.instruction.code = instr;
-			u.type = UTYPE_INSTRUCTION;
-
+			emitter_buffer(em, &instr, sizeof instr);
 			goto out_check_line;
 		}
 		int nextidx = trie_next(pos, here);
@@ -515,25 +504,25 @@ unit parse_line(char **_s) {
 	s = rewind;
 
 	// not an instruction/section/data entry, better be a label
+	char *id_start, *id_end;
 	if (
 		parse_identifier(&s, &id_start, &id_end)
 		|| expect_char_literal(&s, ':')
 	)
-		return err_unit;
-
-	u.u.label.begin = id_start;
-	u.u.label.len = id_end - id_start;
-	u.type = UTYPE_LABEL;
+		return "could not parse as label";
+	// TODO: do stuff with id_start and id_end
+	// like putting the string in the label structure
 
 out_check_line:
 	skip_whitespace(&s);
 	if (!newline(*s) && *s != '\0')
-		return err_unit;
+		return "extra tokens";
 
 	*_s = s;
-	return u;
+	return NULL;
 }
 
+/*
 void assemble(char *input, size_t len, int dst_fd) {
 	char *pos = input;
 	while (pos < input + len) {
@@ -541,6 +530,7 @@ void assemble(char *input, size_t len, int dst_fd) {
 		// TODO
 	}
 }
+*/
 
 int test_parse_line() {
 	struct {
@@ -581,15 +571,18 @@ int test_parse_line() {
 		{ "ecall", 0x00000073, 1 },
 		{ "ebreak", 0x00100073, 1 },
 	};
+	static emitter em;
 	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
 		char *pos = T[i].in;
-		unit res = parse_line(&pos);
-		if (res.type == UTYPE_ERROR && T[i].ok) {
-			printf("failed test %ld (%s): fail/success mismatch\n", i, T[i].in);
+		char *err = parse_line(&pos, &em);
+		if (err != NULL && T[i].ok) {
+			printf("failed test %ld (%s): fail/success mismatch, reported %s\n", i, T[i].in, err);
 			return 1;
 		}
-		if (res.type == UTYPE_INSTRUCTION && T[i].res != res.u.instruction.code) {
-			printf("failed test %ld (%s): expect\n%032b, got\n%032b\n", i, T[i].in, T[i].res, res.u.instruction.code);
+		uint32_t res;
+		memcpy(&res, em.section_buf[em.current_section], sizeof res);
+		if (T[i].res != res) {
+			printf("failed test %ld (%s): expect\n%032b, got\n%032b\n", i, T[i].in, T[i].res, res);
 			return 1;
 		}
 		if (T[i].ok && *pos != '\0') {
