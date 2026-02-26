@@ -4,6 +4,7 @@
 
 #include "../trie.h"
 #include "../ops.h"
+#include "../directives.h"
 
 void trie_set_key(uint64_t keys[2], unsigned char c) {
 	int ik = (c >> 6) & 1;
@@ -272,6 +273,15 @@ int main() {
 	A("ecall", ECALL);
 	A("ebreak", EBREAK);
 
+	A(".byte", K_BYTE);
+	A(".half", K_HALF);
+	A(".word", K_WORD);
+	A(".dword", K_DWORD);
+	A(".ascii", K_ASCII);
+	A(".space", K_SPACE);
+	A(".text", K_TEXT);
+	A(".data", K_DATA);
+
 	gpos = 0;
 	apos = 0;
 	gbuf_size(&base);
@@ -289,7 +299,7 @@ int main() {
 		"\n"
 		"#include \"trie.h\"\n"
 		"\n"
-		"trie instr_tbase[] = {\n"
+		"trie tbase[] = {\n"
 	);
 	for (int i = 0; i <= gpos; i++) {
 		printf("\t{{%luUL,%luUL},{%luUL,%luUL},%d,%d},\n", gbuf[i].keys[0], gbuf[i].keys[1], gbuf[i].terms[0], gbuf[i].terms[1], gbuf[i].next, gbuf[i].data);
@@ -297,7 +307,7 @@ int main() {
 	printf(
 		"};\n"
 		"\n"
-		"int instr_tbase_auxiliary[] = {\n"
+		"int tbase_auxiliary[] = {\n"
 	);
 	for (int i = 0; i < apos; i++) {
 		printf("\t%d,\n", aux[i]);

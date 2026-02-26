@@ -7,30 +7,19 @@
 
 #include "trie.h"
 #include "ops.h"
+#include "directives.h"
 
 #include "instruction_trie.h"
 
-/*
+#define CC_NO_SHORT_NAMES
+#include "cc.h"
 
-sections:
-.data
-.text
+const char *const no_mem = "memory allocation failed";
 
-labels
-instructions
-
-source = { line }
-line = section | label | instruction "\n"
-instruction = rtype | xitype | lstype | btype | utype | xjtype | x1type | x2type
-rtype = rop reg "," reg "," reg
-xitype = iop | jalr reg "," reg "," imm
-lstype = lop | sop reg "," imm "(" reg ")"
-btype = bop reg "," reg "," label
-xjtype = jal reg "," label
-x1type = lui | auipc reg "," imm
-x2type = ebreak | ecall
-
-*/
+[[noreturn]] void panic(const char *const msg) {
+	puts(msg);
+	exit(-1);
+}
 
 typedef struct {
 	char *begin;
@@ -40,28 +29,98 @@ typedef struct {
 // BEHOLD: THE STRUCT OF DOOM
 typedef struct {
 	union {
+		// UTYPE_INSTRUCTION
 		struct {
 			// code stores the assembled machine code
 			// it may be incomplete, relying on a future label
 			// if that is the case, imm_assign is not ASSIGN_NONE
 			uint32_t code;
-			enum {
+			enum assign_type {
 				ASSIGN_NONE,
 				ASSIGN_U_IMM,
 				ASSIGN_J_IMM,
 			} imm_assign;
 			string label;
 		} instruction;
+
+		// yes, I'm aware of there being duplicate types in this union
+		// they correspond to different UTYPEs and I didn't want to have
+		// int int_data; string string_data;
+
+		// UTYPE_LABEL
+		// view of part of the string being parsed; no need to free
 		string label;
-		string section;
+
+		// UTYPE_ASCII
+		// also a view
+		string strdata;
+
+		// UTYPE_SPACE
+		int space;
 	} u;
 	enum {
-		UTYPE_INSTRUCTION,
+		/*
+		UTYPE_BYTES = K_BYTE,
+		UTYPE_HALVES = K_HALF,
+		UTYPE_WORDS = K_WORD,
+		UTYPE_DWORDS = K_DWORD,
+		UTYPE_ASCII = K_ASCII,
+		UTYPE_SPACE = K_SPACE,
+		UTYPE_TEXT = K_TEXT,
+		UTYPE_DATA = K_DATA,
+		*/
+		UTYPE_INSTRUCTION = N_DIRECTIVES,
 		UTYPE_LABEL,
-		UTYPE_SECTION,
 		UTYPE_ERROR,
-	} type;
+	} type; // type enum directive is allowed to be assigned to this field
 } unit;
+
+/*
+typedef struct {
+	int fix_idx; // offset into text section of instruction that needs the
+		     // immediate
+	enum assign_type assign;
+} label_waiter;
+
+typedef struct {
+	cc_vec(label_waiter) waiters;
+	int64_t val; // negative if unassigned and there are waiters
+} label;
+
+#define CC_DTOR label, { if (val.val < 0) cc_cleanup(&val.waiters); }
+#define CC_CMPR string, { return val_1.len != val_2.len || strncmp(val_1.begin, val_2.begin, val_1.len); }
+#define CC_HASH string, { return cc_wyhash(val.begin, val.len); }
+#include "cc.h"
+
+typedef struct {
+	cc_map(string, label) map;
+} labels;
+
+int labels_add(labels *l, string key, uint32_t val) {
+	size_t old_sz = cc_size(&l->map);
+	label nu;
+	nu.val = val;
+	label *e = cc_get_or_insert(&l->map, key, nu);
+	if (!e)
+		panic(no_mem);
+	if (cc_size(&l->map) != old_sz)
+		return 0; // inserted new label with val
+	if (e->val >= 0)
+		return -1; // that's a duplicate label
+	e->val = val;
+	// resolve each waiter
+	cc_for_each(&e->waiters, waiter) {
+		// TODO: set imm in the label_waiter
+		// this will mean defining functions to set U-/J-type immediates
+		// it also needs a way to get the u32 holding the instruction
+	}
+	cc_cleanup(&e->waiters);
+	return 0;
+}
+
+int64_t label_get_or_wait(labels *l, uint32_t *wait_dst, enum assign_type wait_assign) {
+}
+*/
 
 int whitespace(char c) {
 	return c == ' ' || c == '\t';
@@ -101,9 +160,14 @@ int expect_literal(char **_s, const char *expect, size_t expect_len) {
 }
 
 // unlike expect_literal, this consumes leading whitespace
+// additionally, this assigns skipped whitespace to _s unconditionally, which is
+// required to do something like
+// if (expect_char_literal(&s, 'a') || *s != 'b' || *s != 'c')
+// which checks for the absence of one of several chars
 int expect_char_literal(char **_s, char c) {
 	char *s = *_s;
 	skip_whitespace(&s);
+	*_s = s;
 	if (*s++ != c)
 		return -1;
 	*_s = s;
@@ -222,7 +286,7 @@ int parse_imm(char **_s, long long *imm) {
 	if (
 		s == end || (
 			(
-				res == 0 
+				res == 0
 				|| res == LLONG_MAX
 				|| res == LLONG_MIN
 			)
@@ -303,29 +367,60 @@ unit parse_line(char **_s) {
 		.type = UTYPE_ERROR
 	};
 	char *id_start, *id_end;
+	unit u;
 
 	char *s = *_s;
 
 	skip_whitespace(&s);
 	char *rewind = s; // go back here to parse as another kind of line
 
-	// try parsing as an instruction
-	trie *pos = &instr_tbase[0];
+	// try parsing as an instruction/known identifier
+	trie *pos = &tbase[0];
 	char here = *s++;
 	for (;;) {
 		char next = *s;
 		if (!identifier(next)) {
 			int termidx = trie_term(pos, here);
 			if (termidx < 0)
-				break; // it's not an instruction, try again
+				break; // it's not a string we know about
 
-			int operation = instr_tbase_auxiliary[termidx];
+			int operation = tbase_auxiliary[termidx];
+
+			long long ibuf;
+
+			// check if it's a directive
+			// TODO
+			// u.type should be operation if any of the cases in
+			// the next switch are used
+			u.type = operation;
+			switch (operation) {
+			case K_BYTE:
+			case K_HALF:
+			case K_WORD:
+			case K_DWORD:
+			case K_TEXT:
+			case K_DATA:
+				goto out_check_line;
+			case K_ASCII:
+				// TODO
+				goto out_check_line;
+			case K_SPACE:
+				if (
+					parse_imm(&s, &ibuf)
+					|| ibuf >= 4294967296LL || ibuf < 0
+				)
+					return err_unit;
+				u.u.space = ibuf;
+				goto out_check_line;
+			}
+
+			// not a directive, must be an operation
+
 			assert(operation < N_OPS && operation >= 0);
 
 			uint32_t t0, t1, t2;
-			long long ibuf;
 
-			unit u;
+			u.u.instruction.imm_assign = ASSIGN_NONE;
 
 			uint32_t instr = opcodes[operation];
 			switch (formats[operation]) {
@@ -404,30 +499,17 @@ unit parse_line(char **_s) {
 				assert(0);
 			}
 
-			skip_whitespace(&s);
-			if (!newline(*s) && *s != '\0')
-				return err_unit;
-
 			u.u.instruction.code = instr;
 			u.type = UTYPE_INSTRUCTION;
-			*_s = s;
-			return u;
+
+			goto out_check_line;
 		}
 		int nextidx = trie_next(pos, here);
 		if (nextidx < 0)
-			break; // not an instruction
-		pos = instr_tbase + instr_tbase_auxiliary[nextidx];
+			break; // not a string we know about
+		pos = tbase + tbase_auxiliary[nextidx];
 		s++;
 		here = next;
-	}
-
-	s = rewind;
-
-	// not an instruction, try parsing as a section or data entry
-	// could be .string, .word, .text, .data, etc.
-	if (*s == '.') {
-		s++;
-		// TODO
 	}
 
 	s = rewind;
@@ -439,15 +521,25 @@ unit parse_line(char **_s) {
 	)
 		return err_unit;
 
+	u.u.label.begin = id_start;
+	u.u.label.len = id_end - id_start;
+	u.type = UTYPE_LABEL;
+
+out_check_line:
 	skip_whitespace(&s);
 	if (!newline(*s) && *s != '\0')
 		return err_unit;
 
 	*_s = s;
-	return (unit) {
-		.u = { .label = { id_start, id_end - id_start } },
-		.type = UTYPE_LABEL
-	};
+	return u;
+}
+
+void assemble(char *input, size_t len, int dst_fd) {
+	char *pos = input;
+	while (pos < input + len) {
+		unit u = parse_line(&pos);
+		// TODO
+	}
 }
 
 int test_parse_line() {
@@ -509,7 +601,7 @@ int test_parse_line() {
 }
 
 // NOTE: tests do not cover ensuring a register ending in a comma or whitespace
-// is permissable (ie "x0," or "x0 ")
+// is permissable (ie "x0," or "x0 ") since it's covered by test_parse_line
 int test_parse_reg() {
 	struct {
 		char *in;
