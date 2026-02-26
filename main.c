@@ -34,8 +34,8 @@ enum {
 typedef struct {
 	uint8_t section_buf[N_SECTIONS][4096];
 	struct {
-		int len;
-		int pos;
+		int len; // position of next availible byte in buffer
+		int pos; // relative to the first byte written, ignoring flushes
 		int swap;
 	} section[N_SECTIONS];
 	int current_section;
@@ -64,6 +64,8 @@ void emitter_buffer(emitter *em, void *data, size_t len) {
 		pos = 0;
 	}
 	memcpy(&em->section_buf[sect][pos], data, len);
+	em->section[sect].len += len;
+	em->section[sect].pos += len;
 }
 
 typedef struct {
@@ -403,6 +405,7 @@ char *parse_line(char **_s, emitter *em) {
 					|| ibuf >= 4294967296LL || ibuf < 0
 				)
 					return "immediate out of range";
+				// TODO
 				goto out_check_line;
 			}
 
@@ -526,7 +529,7 @@ out_check_line:
 void assemble(char *input, size_t len, int dst_fd) {
 	char *pos = input;
 	while (pos < input + len) {
-		unit u = parse_line(&pos);
+		char *err = parse_line(&pos);
 		// TODO
 	}
 }
@@ -572,7 +575,10 @@ int test_parse_line() {
 		{ "ebreak", 0x00100073, 1 },
 	};
 	static emitter em;
+	em.current_section = SECT_TEXT;
 	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
+		em.section[em.current_section].pos = 0;
+		em.section[em.current_section].len = 0;
 		char *pos = T[i].in;
 		char *err = parse_line(&pos, &em);
 		if (err != NULL && T[i].ok) {
