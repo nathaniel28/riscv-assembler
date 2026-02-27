@@ -3,16 +3,16 @@
 
 #include <stdint.h>
 
-enum {
+enum format {
 	R_TYPE,
 	I_TYPE,
 	S_TYPE,
 	B_TYPE,
 	U_TYPE,
 	J_TYPE,
-} format;
+};
 
-enum {
+enum op {
 	ADD,
 	SUB,
 	XOR,
@@ -62,7 +62,7 @@ enum {
 	AUIPC,
 
 	N_OPS
-} op;
+};
 
 uint8_t formats[] = {
 	[ADD] = R_TYPE,

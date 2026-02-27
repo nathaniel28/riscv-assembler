@@ -3,7 +3,7 @@
 
 #include "ops.h"
 
-enum {
+enum directive {
 	// to keep everything in the same trie, start after the op enum
 	K_BYTE = N_OPS,
 	K_HALF,
@@ -15,6 +15,6 @@ enum {
 	K_DATA,
 
 	N_DIRECTIVES,
-} directive;
+};
 
 #endif

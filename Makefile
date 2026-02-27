@@ -1,4 +1,4 @@
-SOURCES=main.c trie.c
+SOURCES=main.c trie.c emitter.c
 OBJS=$(addsuffix .o, $(basename $(notdir $(SOURCES))))
 CFLAGS=-g -Wall -Wextra -pedantic
 LIBS=
