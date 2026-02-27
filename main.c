@@ -438,7 +438,8 @@ char *parse_data_array(char **_s, emitter *em, int bytes) {
 	char *s = *_s;
 	long long ibuf;
 	// NOTE: O rm mul
-	long long x = 1 << (8 * bytes);
+	// TODO: this assumes a long long is 64 bits, maybe static assert that
+	long long x = 1LL << (8 * bytes);
 	long long y = -(x / 2);
 	size_t bytes_emitted = 0;
 	for (;;) {
@@ -454,6 +455,8 @@ char *parse_data_array(char **_s, emitter *em, int bytes) {
 		uint64_t res = htole64(ibuf);
 		emitter_buffer(em, &res, bytes);
 		bytes_emitted += bytes;
+		if (expect_char_literal(&s, ','))
+			break;
 	}
 	// keep things 4-byte aligned
 	emitter_advance(em, bytes_emitted % 4);
@@ -719,6 +722,18 @@ int test_parse_line() {
 #undef U
 #define U(in, ...) { in, __VA_ARGS__, sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]), 1 }
 		U(".ascii \"~!@#$%^&*()_+`-=[]{}|;':,./<>?\\\\\\\"\\b\\f\\n\\r\\tabcdefghijklmnopqrstuvwxyz\"", (char []) {126, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 96, 45, 61, 91, 93, 123, 125, 124, 59, 39, 58, 44, 46, 47, 60, 62, 63, 92, 34, 8, 12, 10, 13, 9, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122}),
+		U(".byte 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14", (uint8_t []) {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}),
+		U(".byte 255", (uint8_t []) {255}),
+		U(".half 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14", (uint16_t []) {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}),
+		U(".half 65535", (uint16_t []) {65535}),
+		U(".word 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14", (uint32_t []) {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}),
+		U(".word 4294967295", (uint32_t []) {4294967295}),
+		U(".dword 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14", (uint64_t []) {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}),
+		U(".dword -1", (uint64_t []) {18446744073709551615UL}),
+		//U(".dword 18446744073709551615", (uint64_t []) {18446744073709551615UL}),
+		// NOTE: about above test: strtoll is signed and won't accept
+		// the above test, so I'd need to write my own number parser
+		// which isn't the end of the world but I don't want to now
 #undef U
 	};
 	static emitter em;
