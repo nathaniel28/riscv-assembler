@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <endian.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -18,8 +19,6 @@
 
 const char *const no_mem = "memory allocation failed";
 
-const char *const bad_write = "write call failed";
-
 [[noreturn]] void panic(const char *const msg) {
 	puts(msg);
 	exit(-1);
@@ -31,12 +30,17 @@ enum {
 	N_SECTIONS,
 } section;
 
+// the goal of an emitter is to store data in seperate places for all sections
+// (currently .text or .data) because since the program being assembled need
+// not list the sections in the "correct" order, or may swap between the same
+// sections more than once, all the assembled instructions/data needs to be
+// buffered
 typedef struct {
 	uint8_t section_buf[N_SECTIONS][4096];
 	struct {
 		int len; // position of next availible byte in buffer
-		int pos; // relative to the first byte written, ignoring flushes
-		int swap;
+		int pos; // relative to the first byte written, ignoring clears
+		int swap; // fd of file buffer
 	} section[N_SECTIONS];
 	int current_section;
 } emitter;
@@ -44,11 +48,12 @@ typedef struct {
 // write the contents of a buffer to a file to make room for more stuff
 void emitter_clear_buffer(emitter *em, int sect) {
 	if (write(em->section[sect].swap, em->section_buf[sect], em->section[sect].len) != em->section[sect].len)
-		panic(bad_write);
+		panic("write call failed");
 	em->section[sect].len = 0;
 }
 
 // buffer some data
+// buffer as in "to buffer" instead of "a buffer"
 void emitter_buffer(emitter *em, void *data, size_t len) {
 	// for fewer copies, we could check if len > the buffer size
 	// and if it is, write directly from data instead of copying data
@@ -66,6 +71,22 @@ void emitter_buffer(emitter *em, void *data, size_t len) {
 	memcpy(&em->section_buf[sect][pos], data, len);
 	em->section[sect].len += len;
 	em->section[sect].pos += len;
+}
+
+// make space, possibly with the help of a hole in the file buffer
+void emitter_advance(emitter *em, size_t len) {
+	// TODO validate this
+	int sect = em->current_section;
+	size_t pos = em->section[sect].len;
+	em->section[sect].pos += len;
+	if (pos + len >= sizeof em->section_buf[0]) {
+		emitter_clear_buffer(em, sect);
+		if (lseek(em->section[sect].swap, len, SEEK_CUR) == -1)
+			panic("lseek call failed");
+	} else {
+		bzero(&em->section_buf[sect][pos], len);
+		em->section[sect].len += len;
+	}
 }
 
 typedef struct {
@@ -361,13 +382,95 @@ int parse_ls_reg_imm_reg(char **_s, uint32_t *r0, uint32_t *imm, uint32_t *r1) {
 	return 0;
 }
 
+char *parse_string_literal(char **_s, emitter *em) {
+	char *s = *_s;
+	if (expect_char_literal(&s, '"'))
+		return "expected start of string";
+	for (;;) {
+		char c = *s++;
+		switch (c) {
+		case '"':
+			// keep things 4-byte aligned
+			emitter_advance(em, (s - *_s) % 4);
+			*_s = s;
+			return NULL;
+		case '\0':
+		case '\n':
+			return "unexpected end of string literal";
+		case '\\':
+			c = *s++;
+			switch (c) {
+			case '"':
+			case '\\':
+			case '\n':
+				// no change to c
+				break;
+			case 'b':
+				c = '\b';
+				break;
+			case 'f':
+				c = '\f';
+				break;
+			case 'n':
+				c = '\n';
+				break;
+			case 'r':
+				c = '\r';
+				break;
+			case 't':
+				c = '\t';
+				break;
+			case '\0':
+				return "unexpected end of string";
+			default:
+				return "unknown escape character";
+			}
+			// fallthrough
+		default:
+			emitter_buffer(em, &c, sizeof c);
+		}
+	}
+}
+
+// usable with bytes <= 8 (and bytes > 0 of course),
+// since a u64 is used as a buffer
+char *parse_data_array(char **_s, emitter *em, int bytes) {
+	char *s = *_s;
+	long long ibuf;
+	// NOTE: O rm mul
+	long long x = 1 << (8 * bytes);
+	long long y = -(x / 2);
+	size_t bytes_emitted = 0;
+	for (;;) {
+		if (
+			parse_imm(&s, &ibuf)
+			|| (
+				bytes < 8
+				&& (ibuf >= x || ibuf < y)
+			)
+		)
+			return "immediate doesn't fit";
+		// TODO: validate this works on a big endian machine
+		uint64_t res = htole64(ibuf);
+		emitter_buffer(em, &res, bytes);
+		bytes_emitted += bytes;
+	}
+	// keep things 4-byte aligned
+	emitter_advance(em, bytes_emitted % 4);
+	*_s = s;
+	return NULL;
+}
+
 // *_s is *optionally* null-terminated
 // *_s *must have* at least one '\n'
 // returns NULL if no error occured
 // otherwise, returns a string with a description of the error that may be
 // presented to the user
+// may add data to the emitter's buffer even in the event of parsing failure
 char *parse_line(char **_s, emitter *em) {
 	char *s = *_s;
+
+	char *err;
 
 	skip_whitespace(&s);
 	char *rewind = s; // go back here to parse as another kind of line
@@ -390,14 +493,35 @@ char *parse_line(char **_s, emitter *em) {
 			// TODO
 			switch (operation) {
 			case K_BYTE:
+				err = parse_data_array(&s, em, 1);
+				if (err != NULL)
+					return err;
+				goto out_check_line;
 			case K_HALF:
+				err = parse_data_array(&s, em, 2);
+				if (err != NULL)
+					return err;
+				goto out_check_line;
 			case K_WORD:
+				err = parse_data_array(&s, em, 4);
+				if (err != NULL)
+					return err;
+				goto out_check_line;
 			case K_DWORD:
+				err = parse_data_array(&s, em, 8);
+				if (err != NULL)
+					return err;
+				goto out_check_line;
 			case K_TEXT:
+				em->current_section = SECT_TEXT;
+				goto out_check_line;
 			case K_DATA:
+				em->current_section = SECT_DATA;
 				goto out_check_line;
 			case K_ASCII:
-				// TODO
+				err = parse_string_literal(&s, em);
+				if (err != NULL)
+					return err;
 				goto out_check_line;
 			case K_SPACE:
 				if (
@@ -405,7 +529,7 @@ char *parse_line(char **_s, emitter *em) {
 					|| ibuf >= 4294967296LL || ibuf < 0
 				)
 					return "immediate out of range";
-				// TODO
+				emitter_advance(em, ibuf);
 				goto out_check_line;
 			}
 
@@ -538,62 +662,97 @@ void assemble(char *input, size_t len, int dst_fd) {
 int test_parse_line() {
 	struct {
 		char *in;
-		uint32_t res;
+		void *res;
+		size_t len;
 		_Bool ok;
 	} T[] = {
-		{ " \t\t add \t  x0   ,\t  x1  \t,   x2  ", 0x00208033, 1 },
-		{ "add x0, x1, x2", 0x00208033, 1 },
-		{ "sub x3, x4, x5", 0x405201b3, 1 },
-		{ "xor x6, x7, x8", 0x0083c333, 1 },
-		{ "or x9, x10, x11", 0x00b564b3, 1 },
-		{ "and x12, x13, x14", 0x00e6f633, 1 },
-		{ "sll x15, x16, x17", 0x011817b3, 1 },
-		{ "srl x18, x19, x20", 0x0149d933, 1 },
-		{ "sra x21, x22, x23", 0x417b5ab3, 1 },
-		{ "slt x24, x25, x26", 0x01acac33, 1 },
-		{ "sltu x27, x28, x29", 0x01de3db3, 1 },
-		{ "addi x30, x31, -2048", 0x800f8f13, 1 },
-		{ "xori x14, x7, 2047", 0x7ff3c713, 1 },
-		{ "ori x14, x7, -683", 0xd553e713, 1 },
-		{ "andi x14, x7, 1365", 0x5553f713, 1 },
-		{ "slli x14, x7, 31", 0x01f39713, 1 },
-		{ "srli x14, x7, 0", 0x0003d713, 1 },
-		{ "srai x14, x7, 15", 0x40f3d713, 1 },
-		{ "slti x14, x7, 25", 0x0193a713, 1 },
-		{ "sltiu x14, x7, -1", 0xfff3b713, 1 },
-		{ "lb t1, 2047(t6)", 0x7fff8303, 1 },
-		{ "lh t1, -2048(t6)", 0x800f9303, 1 },
-		{ "lw t1, -683(t6)", 0xd55fa303, 1 },
-		{ "lbu t1, 1365(t6)", 0x555fc303, 1 },
-		{ "lhu t1, -1(t6)", 0xffffd303, 1 },
-		{ "sb a2, -683(a7)", 0xd4c88aa3, 1 },
-		{ "sh a2, -1(a7)", 0xfec89fa3, 1 },
-		{ "sw a2, 1365(a7)", 0x54c8aaa3, 1 },
-		{ "lui a1, 1048575", 0xfffff5b7, 1 },
-		{ "auipc t6, 1048575", 0xffffff97, 1 },
-		{ "ecall", 0x00000073, 1 },
-		{ "ebreak", 0x00100073, 1 },
+#define U(in, u32) { in, (uint32_t []) { u32 }, sizeof(uint32_t), 1 }
+		U(" \t\t add \t  x0   ,\t  x1  \t,   x2  ", 0x00208033),
+		U("add x0,x1,x2", 0x00208033),
+		U("add x0, x1, x2", 0x00208033),
+		U("sub x3, x4, x5", 0x405201b3),
+		U("xor x6, x7, x8", 0x0083c333),
+		U("or x9, x10, x11", 0x00b564b3),
+		U("and x12, x13, x14", 0x00e6f633),
+		U("sll x15, x16, x17", 0x011817b3),
+		U("srl x18, x19, x20", 0x0149d933),
+		U("sra x21, x22, x23", 0x417b5ab3),
+		U("slt x24, x25, x26", 0x01acac33),
+		U("sltu x27, x28, x29", 0x01de3db3),
+		U("addi x30, x31, -2048", 0x800f8f13),
+		U("xori x14, x7, 2047", 0x7ff3c713),
+		U("ori x14, x7, -683", 0xd553e713),
+		U("andi x14, x7, 1365", 0x5553f713),
+		U("slli x14, x7, 31", 0x01f39713),
+		U("srli x14, x7, 0", 0x0003d713),
+		U("srai x14, x7, 15", 0x40f3d713),
+		U("slti x14, x7, 25", 0x0193a713),
+		U("sltiu x14, x7, -1", 0xfff3b713),
+		U("lb t1, 2047(t6)", 0x7fff8303),
+		U("lh t1, -2048(t6)", 0x800f9303),
+		U("lw t1, -683(t6)", 0xd55fa303),
+		U("lbu t1, 1365(t6)", 0x555fc303),
+		U("lhu t1, -1(t6)", 0xffffd303),
+		U("sb a2, -683(a7)", 0xd4c88aa3),
+		U("sh a2, -1(a7)", 0xfec89fa3),
+		U("sw a2, 1365(a7)", 0x54c8aaa3),
+		U("lui a1, 1048575", 0xfffff5b7),
+		U("auipc t6, 1048575", 0xffffff97),
+		U("ecall", 0x00000073),
+		U("ebreak", 0x00100073),
+#undef U
+#define U(in) { in, NULL, 0, 0 }
+		U(""),
+		U("addi x0, x0, -2049"),
+		U("addi x0, x0, 2048"),
+		U("lb t0, 2048(t0)"),
+		U("lh t0, -2049(t0)"),
+		U("slli x0, x0, -1"),
+		U("srai x0, x0, 32"),
+		U("\n"),
+		U("and"),
+		U("and x99, x0, x0"),
+		U("and x0, x0"),
+		U("lh t1, 0, t6"),
+		U("a x0, x0, x0"),
+		U("add x0, x0, x0 add x0, x0, x0"),
+#undef U
+#define U(in, ...) { in, __VA_ARGS__, sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]), 1 }
+		U(".ascii \"~!@#$%^&*()_+`-=[]{}|;':,./<>?\\\\\\\"\\b\\f\\n\\r\\tabcdefghijklmnopqrstuvwxyz\"", (char []) {126, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 96, 45, 61, 91, 93, 123, 125, 124, 59, 39, 58, 44, 46, 47, 60, 62, 63, 92, 34, 8, 12, 10, 13, 9, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122}),
+#undef U
 	};
 	static emitter em;
 	em.current_section = SECT_TEXT;
 	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
+		// note that it's fine to write more than one of the section
+		// buffer's size to an emitter, but the extra data will be
+		// stored elsewhere which means the memcmp won't work
+		// thus we make this assertion
+		assert(T[i].len <= sizeof em.section_buf[0]);
 		em.section[em.current_section].pos = 0;
 		em.section[em.current_section].len = 0;
 		char *pos = T[i].in;
 		char *err = parse_line(&pos, &em);
-		if (err != NULL && T[i].ok) {
-			printf("failed test %ld (%s): fail/success mismatch, reported %s\n", i, T[i].in, err);
+		if ((err != NULL) == T[i].ok) {
+			printf("failed test %ld (%s): fail/success mismatch, reported %s\n", i, T[i].in, err ? err : "no errors");
 			return 1;
 		}
-		uint32_t res;
-		memcpy(&res, em.section_buf[em.current_section], sizeof res);
-		if (T[i].res != res) {
-			printf("failed test %ld (%s): expect\n%032b, got\n%032b\n", i, T[i].in, T[i].res, res);
-			return 1;
-		}
-		if (T[i].ok && *pos != '\0') {
-			printf("failed test %ld (%s): bad advancement (%s)\n", i, T[i].in, pos);
-			return 1;
+		if (!err) {
+			if (memcmp(em.section_buf[em.current_section], T[i].res, T[i].len)) {
+				printf("failed test %ld (%s)", i, T[i].in);
+				if (T[i].len == sizeof(uint32_t)) {
+					uint32_t want, got;
+					memcpy(&want, T[i].res, sizeof want);
+					memcpy(&got, em.section_buf[em.current_section], sizeof got);
+					printf(": expect\n%032b, got\n%032b", want, got);
+				}
+				printf("\n");
+				return 1;
+			}
+			if (T[i].ok && *pos != '\0') {
+				printf("failed test %ld (%s): bad advancement (%s)\n", i, T[i].in, pos);
+				return 1;
+			}
 		}
 	}
 	return 0;
@@ -687,7 +846,7 @@ int test_parse_reg() {
 		char *pos = T[i].in;
 		uint32_t reg;
 		int err = parse_reg(&pos, &reg);
-		if (err && T[i].ok) {
+		if ((err != 0) == T[i].ok) {
 			printf("failed test %ld (%s): fail/success mismatch\n", i, T[i].in);
 			return 1;
 		}
@@ -704,15 +863,7 @@ int test_parse_reg() {
 }
 
 int main() {
-	test_parse_line();
 	test_parse_reg();
-	/*
-	char *test = (
-		//".text\n"
-		"addi s1, zero, x5\n"
-	);
-	char *pos = test;
-	parse_line(&pos);
-	*/
+	test_parse_line();
 	return 0;
 }
