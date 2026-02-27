@@ -1,5 +1,4 @@
 
-#include "parser.h"
 #include <assert.h>
 #include <endian.h>
 #include <errno.h>
@@ -14,14 +13,14 @@
 #include "emitter.h"
 #include "instruction_trie.h"
 #include "ops.h"
-
+#include "parser.h"
 #include "trie.h"
 
 int test_parse_line() {
 	struct {
 		char *in;
 		void *res;
-		size_t len;
+		size_t sz;
 		_Bool ok;
 	} T[] = {
 #define U(in, u32) { in, (uint32_t []) { u32 }, sizeof(uint32_t), 1 }
@@ -75,7 +74,7 @@ int test_parse_line() {
 		U("a x0, x0, x0"),
 		U("add x0, x0, x0 add x0, x0, x0"),
 #undef U
-#define U(in, ...) { in, __VA_ARGS__, sizeof(__VA_ARGS__) / sizeof((__VA_ARGS__)[0]), 1 }
+#define U(in, ...) { in, __VA_ARGS__, sizeof(__VA_ARGS__), 1 }
 		U(".ascii \"~!@#$%^&*()_+`-=[]{}|;':,./<>?\\\\\\\"\\b\\f\\n\\r\\tabcdefghijklmnopqrstuvwxyz\"", (char []) {126, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 96, 45, 61, 91, 93, 123, 125, 124, 59, 39, 58, 44, 46, 47, 60, 62, 63, 92, 34, 8, 12, 10, 13, 9, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122}),
 		U(".byte 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14", (uint8_t []) {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}),
 		U(".byte 255", (uint8_t []) {255}),
@@ -98,7 +97,7 @@ int test_parse_line() {
 		// buffer's size to an emitter, but the extra data will be
 		// stored elsewhere which means the memcmp won't work
 		// thus we make this assertion
-		assert(T[i].len <= sizeof em.section_buf[0]);
+		assert(T[i].sz <= sizeof em.section_buf[0]);
 		em.section[em.current_section].pos = 0;
 		em.section[em.current_section].len = 0;
 		char *pos = T[i].in;
@@ -108,9 +107,9 @@ int test_parse_line() {
 			return 1;
 		}
 		if (!err) {
-			if (memcmp(em.section_buf[em.current_section], T[i].res, T[i].len)) {
+			if (memcmp(em.section_buf[em.current_section], T[i].res, T[i].sz)) {
 				printf("failed test %ld (%s)", i, T[i].in);
-				if (T[i].len == sizeof(uint32_t)) {
+				if (T[i].sz == sizeof(uint32_t)) {
 					uint32_t want, got;
 					memcpy(&want, T[i].res, sizeof want);
 					memcpy(&got, em.section_buf[em.current_section], sizeof got);

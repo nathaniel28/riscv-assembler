@@ -14,7 +14,7 @@ instruction_trie.c: instruction_trie/builder
 %.o: %.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-asm: instruction_trie.h $(OBJS)
+asm: $(OBJS)
 	$(CC) $(CFLAGS) $(LIBS) $(OBJS) -o $@
 
 clean:
