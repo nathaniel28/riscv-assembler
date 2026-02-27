@@ -1,4 +1,4 @@
-#include <linux/elf.h>
+#include <elf.h>
 #include <unistd.h>
 
 #include "emitter.h"
@@ -49,6 +49,62 @@ void emitter_advance(emitter *em, size_t len) {
 		em->section[sect].len += len;
 	}
 }
+
+/*
+#define TEXT_VADDR 0x400000
+
+void emitter_output_elf(emitter *em, int dst) {
+	struct {
+		Elf64_Ehdr ehdr;
+		Elf64_Phdr text;
+		Elf64_Phdr data;
+	} header;
+	header.ehdr.e_ident[EI_MAG0] = 0x7f;
+	header.ehdr.e_ident[EI_MAG1] = 'E';
+	header.ehdr.e_ident[EI_MAG2] = 'L';
+	header.ehdr.e_ident[EI_MAG3] = 'F';
+	header.ehdr.e_ident[EI_CLASS] = ELFCLASS64;
+#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+	header.ehdr.e_ident[EI_DATA] = ELFDATA2MSB;
+#else
+	header.ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
+#endif
+	header.ehdr.e_ident[EI_VERSION] = EV_CURRENT;
+	header.ehdr.e_ident[EI_OSABI] = ELFOSABI_SYSV; // gcc uses this for me
+	header.ehdr.e_ident[EI_ABIVERSION] = 0;
+	header.ehdr.e_ident[EI_PAD] = 0; // unused padding
+	header.ehdr.e_type = ET_EXEC;
+	header.ehdr.e_machine = EM_RISCV; // now we're getting somewhere
+	header.ehdr.e_version = EV_CURRENT;
+	// TODO: lookup _start label, and add that to hdr.e_entry
+	header.ehdr.e_entry = TEXT_VADDR;
+	header.ehdr.e_phoff = 0x40; // right after the elf header
+	header.ehdr.e_shoff = 0;
+	header.ehdr.e_flags = 0;
+	header.ehdr.e_ehsize = 64;
+	header.ehdr.e_phentsize = 0;
+	header.ehdr.e_phnum = 2; // TODO: verify
+	header.ehdr.e_shentsize = 0x40; // TODO: verify
+	header.ehdr.e_shnum = 0;
+	header.ehdr.e_shstrndx 0;
+
+	header.text.p_type = PT_LOAD;
+	header.text.p_flags = PF_X | PF_R;
+	header.text.p_vaddr = TEXT_VADDR;
+	header.text.p_paddr = TEXT_VADDR; // likely unused
+	header.text.p_filesz = em.section[SECT_TEXT].pos;
+	header.text.p_memsz = em.section[SECT_TEXT].pos;
+	header.text.p_align = 4;
+
+	header.data.p_type = PT_LOAD;
+	header.data.p_flags = PF_R | PF_W;
+	//header.data.p_vaddr = ; // TODO
+	//header.data.p_paddr = ; // TODO
+	header.data.p_filesz = em.section[SECT_DATA].pos;
+	header.data.p_memsz = em.section[SECT_DATA].pos;
+	header.text.p_align = 4;
+}
+*/
 
 int labels_add(labels *l, string key, uint32_t val) {
 	size_t old_sz = cc_size(&l->map);

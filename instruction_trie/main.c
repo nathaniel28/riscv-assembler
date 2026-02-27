@@ -292,12 +292,9 @@ int main() {
 	gbuf_fill(&base);
 
 	printf(
-		"#ifndef INSTRUCTION_TRIE_H\n"
-		"#define INSTRUCTION_TRIE_H\n"
-		"\n"
 		"// This code was auto-generated! Do not modify by hand.\n"
 		"\n"
-		"#include \"trie.h\"\n"
+		"#include \"instruction_trie.h\"\n"
 		"\n"
 		"trie tbase[] = {\n"
 	);
@@ -312,11 +309,7 @@ int main() {
 	for (int i = 0; i < apos; i++) {
 		printf("\t%d,\n", aux[i]);
 	}
-	printf(
-		"};\n"
-		"\n"
-		"#endif\n"
-	);
+	printf("};\n");
 
 	/*
 	trie *tbase = gbuf;

@@ -1,3 +1,6 @@
+#ifndef EMITTER_H
+#define EMITTER_H
+
 #include <stdint.h>
 
 #include "cc.h"
@@ -32,9 +35,9 @@ typedef struct {
 	cc_map(string, label) map;
 } labels;
 
-int labels_add(labels *l, string key, uint32_t val);
+extern int labels_add(labels *l, string key, uint32_t val);
 
-int64_t label_get_or_add_waiter(labels *l, uint32_t *wait_dst, enum assign_type wait_assign);
+extern int64_t label_get_or_add_waiter(labels *l, uint32_t *wait_dst, enum assign_type wait_assign);
 
 
 enum section {
@@ -59,11 +62,13 @@ typedef struct {
 } emitter;
 
 // write the contents of a buffer to a file to make room for more stuff
-void emitter_clear_buffer(emitter *em, int sect);
+extern void emitter_clear_buffer(emitter *em, int sect);
 
 // buffer some data
 // buffer as in "to buffer" instead of "a buffer"
-void emitter_buffer(emitter *em, void *data, size_t len);
+extern void emitter_buffer(emitter *em, void *data, size_t len);
 
 // make space, possibly with the help of a hole in the file buffer
-void emitter_advance(emitter *em, size_t len);
+extern void emitter_advance(emitter *em, size_t len);
+
+#endif
