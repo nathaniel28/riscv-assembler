@@ -11,19 +11,20 @@ typedef struct {
 } string;
 
 enum assign_type {
-	ASSIGN_UTYPE,
+	ASSIGN_BTYPE,
 	ASSIGN_JTYPE,
 };
 
 typedef struct {
-	int fix_idx; // offset into text section of instruction that needs the
-		     // immediate
+	int64_t fix_idx; // offset into text section of instruction
+			 // that needs the immediate
+	int section;
 	enum assign_type assign;
 } label_waiter;
 
 typedef struct {
 	cc_vec(label_waiter) waiters;
-	int64_t val; // negative if unassigned and there are waiters
+	int64_t val; // negative if unassigned (meaning there are waiters)
 } label;
 
 #define CC_DTOR label, { if (val.val < 0) cc_cleanup(&val.waiters); }
@@ -34,11 +35,6 @@ typedef struct {
 typedef struct {
 	cc_map(string, label) map;
 } labels;
-
-extern int labels_add(labels *l, string key, uint32_t val);
-
-extern int64_t label_get_or_add_waiter(labels *l, uint32_t *wait_dst, enum assign_type wait_assign);
-
 
 enum section {
 	SECT_TEXT,
@@ -54,15 +50,14 @@ enum section {
 typedef struct {
 	uint8_t section_buf[N_SECTIONS][4096];
 	struct {
-		int len; // position of next availible byte in buffer
-		int pos; // relative to the first byte written, ignoring clears
+		uint64_t vaddr;
+		uint64_t len; // position of next availible byte in buffer
+		uint64_t pos; // relative to the first byte ever written
 		int swap; // fd of file buffer
 	} section[N_SECTIONS];
+	labels labels;
 	int current_section;
 } emitter;
-
-// write the contents of a buffer to a file to make room for more stuff
-extern void emitter_clear_buffer(emitter *em, int sect);
 
 // buffer some data
 // buffer as in "to buffer" instead of "a buffer"
@@ -70,5 +65,9 @@ extern void emitter_buffer(emitter *em, void *data, size_t len);
 
 // make space, possibly with the help of a hole in the file buffer
 extern void emitter_advance(emitter *em, size_t len);
+
+extern int emitter_label_add(emitter *em, string key);
+
+extern int64_t emitter_label_get_or_add_waiter(emitter *em, string key, enum assign_type wait_assign);
 
 #endif

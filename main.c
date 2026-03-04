@@ -1,20 +1,10 @@
-
 #include <assert.h>
-#include <endian.h>
-#include <errno.h>
-#include <limits.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 
-#include "directives.h"
 #include "emitter.h"
-#include "instruction_trie.h"
-#include "ops.h"
 #include "parser.h"
-#include "trie.h"
 
 int test_parse_line() {
 	struct {
@@ -23,7 +13,7 @@ int test_parse_line() {
 		size_t sz;
 		_Bool ok;
 	} T[] = {
-#define U(in, u32) { in, (uint32_t []) { u32 }, sizeof(uint32_t), 1 }
+#define U(in, u32) { in "\n", (uint32_t []) { u32 }, sizeof(uint32_t), 1 }
 		U(" \t\t add \t  x0   ,\t  x1  \t,   x2  ", 0x00208033),
 		U("add x0,x1,x2", 0x00208033),
 		U("add x0, x1, x2", 0x00208033),
@@ -57,8 +47,19 @@ int test_parse_line() {
 		U("auipc t6, 1048575", 0xffffff97),
 		U("ecall", 0x00000073),
 		U("ebreak", 0x00100073),
+		U("jal x21, undefined_label", 0x00000aef),
+		U("jal x21, L0", 0x00000aef),
+		U("jal x21, L4", 0x00400aef),
+		U("jal x21, alt20", 0xccdccaef),
+		U("jal x21, big20", 0xfffffaef),
+		U("beq x21, x31, undefined_label", 0x01fa8063),
+		U("bne x21, x31, L0", 0x01fa9063),
+		U("blt x21, x31, L4", 0x01fac263),
+		U("bge x21, x31, L8", 0x01fad463),
+		U("bltu x21, x31, alt12", 0xcdfae6e3),
+		U("bgeu x21, x31, big12", 0xfffaffe3),
 #undef U
-#define U(in) { in, NULL, 0, 0 }
+#define U(in) { in "\n", NULL, 0, 0 }
 		U(""),
 		U("addi x0, x0, -2049"),
 		U("addi x0, x0, 2048"),
@@ -74,7 +75,7 @@ int test_parse_line() {
 		U("a x0, x0, x0"),
 		U("add x0, x0, x0 add x0, x0, x0"),
 #undef U
-#define U(in, ...) { in, __VA_ARGS__, sizeof(__VA_ARGS__), 1 }
+#define U(in, ...) { in "\n", __VA_ARGS__, sizeof(__VA_ARGS__), 1 }
 		U(".ascii \"~!@#$%^&*()_+`-=[]{}|;':,./<>?\\\\\\\"\\b\\f\\n\\r\\tabcdefghijklmnopqrstuvwxyz\"", (char []) {126, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 96, 45, 61, 91, 93, 123, 125, 124, 59, 39, 58, 44, 46, 47, 60, 62, 63, 92, 34, 8, 12, 10, 13, 9, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122}),
 		U(".byte 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14", (uint8_t []) {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}),
 		U(".byte 255", (uint8_t []) {255}),
@@ -91,17 +92,57 @@ int test_parse_line() {
 #undef U
 	};
 	static emitter em;
+	cc_init(&em.labels.map);
 	em.current_section = SECT_TEXT;
+	em.section[SECT_TEXT].vaddr = 0x00400000;
+	em.section[SECT_DATA].vaddr = 0x10010000;
+#define STR(strlit) (string) { .begin = strlit, .len = sizeof(strlit) - 1 }
+#define SET_LABEL(em, label, val) do { \
+	auto tmp = (em)->section[(em)->current_section].pos; \
+	(em)->section[(em)->current_section].pos = val; \
+	assert(!emitter_label_add(em, STR(label))); \
+	(em)->section[(em)->current_section].pos = tmp; \
+} while (0)
+	SET_LABEL(&em, "L0", 0);
+	SET_LABEL(&em, "L4", 4);
+	SET_LABEL(&em, "L8", 8);
+	SET_LABEL(&em, "alt20", 0x1ccccc);
+	SET_LABEL(&em, "big20", 0x1ffffe);
+	SET_LABEL(&em, "alt12", 0x1ccc);
+	SET_LABEL(&em, "big12", 0x1ffe);
+#undef SET_LABEL
+#undef STR
+	char *pos, *err;
+	pos = ".data";
+	if ((err = parse_line(&pos, &em))) {
+		printf("failed .data, would not parse, got error %s\n", err);
+		return 1;
+	}
+	if (em.current_section != SECT_DATA) {
+		printf("failed .data, section %d\n", em.current_section);
+		return 1;
+	}
+	pos = ".text";
+	if ((err = parse_line(&pos, &em))) {
+		printf("failed .text, would not parse, got error %s\n", err);
+		return 1;
+	}
+	if (em.current_section != SECT_TEXT) {
+		printf("failed .text, section %d\n", em.current_section);
+		return 1;
+	}
 	for (size_t i = 0; i < sizeof T / sizeof *T; i++) {
 		// note that it's fine to write more than one of the section
 		// buffer's size to an emitter, but the extra data will be
 		// stored elsewhere which means the memcmp won't work
 		// thus we make this assertion
 		assert(T[i].sz <= sizeof em.section_buf[0]);
-		em.section[em.current_section].pos = 0;
-		em.section[em.current_section].len = 0;
-		char *pos = T[i].in;
-		char *err = parse_line(&pos, &em);
+		em.section[SECT_TEXT].len = 0;
+		em.section[SECT_TEXT].pos = 0;
+		em.section[SECT_DATA].len = 0;
+		em.section[SECT_DATA].pos = 0;
+		pos = T[i].in;
+		err = parse_line(&pos, &em);
 		if ((err != NULL) == T[i].ok) {
 			printf("failed test %ld (%s): fail/success mismatch, reported %s\n", i, T[i].in, err ? err : "no errors");
 			return 1;
@@ -118,12 +159,13 @@ int test_parse_line() {
 				printf("\n");
 				return 1;
 			}
-			if (T[i].ok && *pos != '\0') {
+			if (T[i].ok && *pos != '\n') {
 				printf("failed test %ld (%s): bad advancement (%s)\n", i, T[i].in, pos);
 				return 1;
 			}
 		}
 	}
+	cc_cleanup(&em.labels.map);
 	return 0;
 }
 

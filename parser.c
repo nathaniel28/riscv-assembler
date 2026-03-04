@@ -185,12 +185,24 @@ int parse_imm(char **_s, long long *imm) {
 	return 0;
 }
 
-int parse_identifier(char **_s, char **begin, char **end) {
-	(void) _s;
-	(void) begin;
-	(void) end;
-	// TODO
-	return -1;
+void parse_identifier(char **_s, char **begin, char **end) {
+	char *s = *_s;
+	skip_whitespace(&s);
+	*begin = s;
+	while (identifier(*s)) {
+		s++;
+	}
+	*end = s;
+	*_s = s;
+}
+
+string str_parse_identifier(char **_s) {
+	char *begin, *end;
+	parse_identifier(_s, &begin, &end);
+	return (string) {
+		.begin = begin,
+		.len = end - begin,
+	};
 }
 
 int parse_reg_reg_reg(char **_s, uint32_t *r0, uint32_t *r1, uint32_t *r2) {
@@ -328,8 +340,17 @@ char *parse_data_array(char **_s, emitter *em, int bytes) {
 	return NULL;
 }
 
+void set_btype_imm(uint32_t *instr, uint32_t i) {
+	*instr |= ((i & 0x1000) << 19) | ((i & 0x7e0) << 20) | ((i & 0x1e) << 7) | ((i & 0x800) >> 4);
+}
+
+void set_jtype_imm(uint32_t *instr, uint32_t i) {
+	*instr |= ((i & 0x100000) << 11) | (i & 0xff000) | ((i & 0x7fe) << 20) | ((i & 0x800) << 9);
+}
+
 // *_s is *optionally* null-terminated
-// *_s *must have* at least one '\n'
+// *_s *must have* at least one '\n' (currently, this is not true,
+// but it will be once I remove the '\0' checks)
 // returns NULL if no error occured
 // otherwise, returns a string with a description of the error that may be
 // presented to the user
@@ -341,6 +362,8 @@ char *parse_line(char **_s, emitter *em) {
 
 	skip_whitespace(&s);
 	char *rewind = s; // go back here to parse as another kind of line
+
+	string lstr;
 
 	// try parsing as an instruction/known identifier
 	trie *pos = &tbase[0];
@@ -406,11 +429,13 @@ char *parse_line(char **_s, emitter *em) {
 
 			uint32_t t0, t1, t2;
 
+			int64_t lbval;
+
 			uint32_t instr = opcodes[operation];
 			switch (formats[operation]) {
 			case R_TYPE:
 				if (parse_reg_reg_reg(&s, &t0, &t1, &t2))
-					return "could not parse required register, register, register for this operation";
+					return "could not parse register, register, register required for this operation";
 				instr |= t0 << 7; // rd
 				instr |= t1 << 15; // rs1
 				instr |= t2 << 20; // rs2
@@ -432,11 +457,11 @@ char *parse_line(char **_s, emitter *em) {
 				case LHU:
 					// note order of t0, t1, t2
 					if (parse_ls_reg_imm_reg(&s, &t0, &t2, &t1))
-						return "could not parse required register, immediate(register) required for this operation";
+						return "could not parse register, immediate(register) required for this operation";
 					break;
 				default:
 					if (parse_reg_reg_imm(&s, &t0, &t1, &t2))
-						return "could not parse required register, register, immediate for this operation";
+						return "could not parse register, register, immediate required for this operation";
 					break;
 				}
 				switch (operation) {
@@ -455,7 +480,7 @@ char *parse_line(char **_s, emitter *em) {
 				break;
 			case S_TYPE:
 				if (parse_ls_reg_imm_reg(&s, &t0, &t1, &t2))
-					return "could not parse required register, immediate(register) required for this operation";
+					return "could not parse register, immediate(register) required for this operation";
 				instr |= t2 << 15; // rs1
 				instr |= t0 << 20; // rs2
 				instr |= (t1 & 0xfe0) << 20; // imm[11:5]
@@ -463,8 +488,26 @@ char *parse_line(char **_s, emitter *em) {
 				instr |= (uint32_t) func3s[operation] << 12;
 				break;
 			case B_TYPE:
-				// TODO
-				assert(0);
+				if (
+					parse_reg(&s, &t0)
+					|| expect_char_literal(&s, ',')
+					|| parse_reg(&s, &t1)
+					|| expect_char_literal(&s, ',')
+				)
+					return "could not parse register, register required for this operation";
+				lstr = str_parse_identifier(&s);
+				if (lstr.len == 0)
+					return "invalid label";
+				lbval = emitter_label_get_or_add_waiter(em, lstr, ASSIGN_BTYPE);
+				instr |= t0 << 15; // rs1
+				instr |= t1 << 20; // rs2
+				instr |= (uint32_t) func3s[operation] << 12;
+				if (lbval < 0)
+					break; // label has yet to be defined
+				lbval -= em->section[em->current_section].vaddr;
+				lbval -= em->section[em->current_section].pos;
+				set_btype_imm(&instr, (uint32_t) lbval);
+				break;
 			case U_TYPE:
 				if (
 					parse_reg(&s, &t0)
@@ -472,13 +515,27 @@ char *parse_line(char **_s, emitter *em) {
 					|| parse_imm(&s, &ibuf)
 					|| ibuf >= 1048576 || ibuf < 0
 				)
-					return "could not parse required register, immediate required for this operation";
+					return "could not parse register, immediate required for this operation";
 				instr |= t0 << 7; // rd
 				instr |= (uint32_t) ibuf << 12;
 				break;
 			case J_TYPE:
-				// TODO
-				assert(0);
+				if (
+					parse_reg(&s, &t0)
+					|| expect_char_literal(&s, ',')
+				)
+					return "could not parse register required for this operation";
+				lstr = str_parse_identifier(&s);
+				if (lstr.len == 0)
+					return "invalid label";
+				lbval = emitter_label_get_or_add_waiter(em, lstr, ASSIGN_JTYPE);
+				instr |= t0 << 7; // rd
+				if (lbval < 0)
+					break; // label has yet to be defined
+				lbval -= em->section[em->current_section].vaddr;
+				lbval -= em->section[em->current_section].pos;
+				set_jtype_imm(&instr, (uint32_t) lbval);
+				break;
 			default:
 				// default should never occur
 				printf("error: invalid format buffer\n");
@@ -487,6 +544,9 @@ char *parse_line(char **_s, emitter *em) {
 			emitter_buffer(em, &instr, sizeof instr);
 			goto out_check_line;
 		}
+		// TODO: trie_next should really be called before trie_term,
+		// but I can get away with this because I check for the end
+		// of an identifier before trying trie_term
 		int nextidx = trie_next(pos, here);
 		if (nextidx < 0)
 			break; // not a string we know about
@@ -498,12 +558,14 @@ char *parse_line(char **_s, emitter *em) {
 	s = rewind;
 
 	// not an instruction/section/data entry, better be a label
-	char *id_start, *id_end;
+	lstr = str_parse_identifier(&s);
 	if (
-		parse_identifier(&s, &id_start, &id_end)
+		lstr.len == 0
 		|| expect_char_literal(&s, ':')
 	)
 		return "could not parse as label";
+	if (emitter_label_add(em, lstr))
+		return "label redefined";
 	// TODO: do stuff with id_start and id_end
 	// like putting the string in the label structure
 

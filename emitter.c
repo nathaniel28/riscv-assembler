@@ -1,7 +1,9 @@
+#include <assert.h>
 #include <elf.h>
 #include <unistd.h>
 
 #include "emitter.h"
+#include "parser.h"
 
 const char *const no_mem = "memory allocation failed";
 
@@ -10,8 +12,10 @@ const char *const no_mem = "memory allocation failed";
 	exit(-1);
 }
 
+// write the contents of a buffer to a file to make room for more stuff
 void emitter_clear_buffer(emitter *em, int sect) {
-	if (write(em->section[sect].swap, em->section_buf[sect], em->section[sect].len) != em->section[sect].len)
+	ssize_t written = write(em->section[sect].swap, em->section_buf[sect], em->section[sect].len);
+	if (written < 0 || (uint64_t) written != em->section[sect].len)
 		panic("write call failed");
 	em->section[sect].len = 0;
 }
@@ -50,9 +54,79 @@ void emitter_advance(emitter *em, size_t len) {
 	}
 }
 
-/*
-#define TEXT_VADDR 0x400000
+int emitter_label_add(emitter *em, string key) {
+	size_t old_sz = cc_size(&em->labels.map);
+	label nu;
+	nu.val = em->section[em->current_section].pos + em->section[em->current_section].vaddr;
+	label *e = cc_get_or_insert(&em->labels.map, key, nu);
+	if (!e)
+		panic(no_mem);
+	if (cc_size(&em->labels.map) != old_sz)
+		return 0; // inserted new label with val
+	if (e->val >= 0)
+		return -1; // that's a duplicate label
+	// resolve each waiter
+	cc_for_each(&e->waiters, waiter) {
+		int64_t offset = nu.val - (waiter->fix_idx + em->section[waiter->section].vaddr);
+		int64_t len = em->section[waiter->section].len;
+		int64_t pos = em->section[waiter->section].pos;
+		if (pos - len > waiter->fix_idx) {
+			// TODO TODO TODO
+			//read();
+			//write();
+			panic("unimplimented");
+		} else {
+			uint32_t instr;
+			assert((int64_t) sizeof instr + len - (pos - waiter->fix_idx) <= len);
+			uint8_t *target = &em->section_buf[waiter->section][len - (pos - waiter->fix_idx)];
+			memcpy(&instr, target, sizeof instr);
+			switch (waiter->assign) {
+			case ASSIGN_BTYPE:
+				// TODO: verify the immediate fits in b-type
+				// immediate field, but take care to allow
+				// negative values
+				set_btype_imm(&instr, offset << 1);
+				break;
+			case ASSIGN_JTYPE:
+				// TODO: verify the immediate fits in j-type
+				// immediate field, but take care to allow
+				// negative values
+				set_jtype_imm(&instr, offset << 1);
+				break;
+			default:
+				// should never occur
+				assert(0);
+			}
+			memcpy(target, &instr, sizeof instr);
+		}
+	}
+	cc_cleanup(&e->waiters);
+	return 0;
+}
 
+// returns the label's value if known, otherwise returns -1 and adds a waiter
+// for that label
+int64_t emitter_label_get_or_add_waiter(emitter *em, string key, enum assign_type wait_assign) {
+	label nu;
+	nu.val = -1;
+	cc_init(&nu.waiters);
+	label *e = cc_get_or_insert(&em->labels.map, key, nu);
+	if (!e)
+		panic(no_mem);
+	if (e->val < 0) {
+		label_waiter waiter = {
+			.fix_idx = em->section[em->current_section].pos,
+			.section = em->current_section,
+			.assign = wait_assign,
+		};
+		if (!cc_push(&e->waiters, waiter))
+			panic(no_mem);
+		return -1;
+	}
+	return e->val;
+}
+
+/*
 void emitter_output_elf(emitter *em, int dst) {
 	struct {
 		Elf64_Ehdr ehdr;
@@ -64,11 +138,7 @@ void emitter_output_elf(emitter *em, int dst) {
 	header.ehdr.e_ident[EI_MAG2] = 'L';
 	header.ehdr.e_ident[EI_MAG3] = 'F';
 	header.ehdr.e_ident[EI_CLASS] = ELFCLASS64;
-#if __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
-	header.ehdr.e_ident[EI_DATA] = ELFDATA2MSB;
-#else
 	header.ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
-#endif
 	header.ehdr.e_ident[EI_VERSION] = EV_CURRENT;
 	header.ehdr.e_ident[EI_OSABI] = ELFOSABI_SYSV; // gcc uses this for me
 	header.ehdr.e_ident[EI_ABIVERSION] = 0;
@@ -77,7 +147,7 @@ void emitter_output_elf(emitter *em, int dst) {
 	header.ehdr.e_machine = EM_RISCV; // now we're getting somewhere
 	header.ehdr.e_version = EV_CURRENT;
 	// TODO: lookup _start label, and add that to hdr.e_entry
-	header.ehdr.e_entry = TEXT_VADDR;
+	header.ehdr.e_entry = em->section[SECT_TEXT].vaddr;
 	header.ehdr.e_phoff = 0x40; // right after the elf header
 	header.ehdr.e_shoff = 0;
 	header.ehdr.e_flags = 0;
@@ -90,49 +160,18 @@ void emitter_output_elf(emitter *em, int dst) {
 
 	header.text.p_type = PT_LOAD;
 	header.text.p_flags = PF_X | PF_R;
-	header.text.p_vaddr = TEXT_VADDR;
-	header.text.p_paddr = TEXT_VADDR; // likely unused
-	header.text.p_filesz = em.section[SECT_TEXT].pos;
-	header.text.p_memsz = em.section[SECT_TEXT].pos;
+	header.text.p_vaddr = em->section[SECT_TEXT].vaddr;
+	header.text.p_paddr = em->section[SECT_TEXT].vaddr; // likely unused
+	header.text.p_filesz = em->section[SECT_TEXT].pos;
+	header.text.p_memsz = em->section[SECT_TEXT].pos;
 	header.text.p_align = 4;
 
 	header.data.p_type = PT_LOAD;
 	header.data.p_flags = PF_R | PF_W;
-	//header.data.p_vaddr = ; // TODO
-	//header.data.p_paddr = ; // TODO
-	header.data.p_filesz = em.section[SECT_DATA].pos;
-	header.data.p_memsz = em.section[SECT_DATA].pos;
+	header.data.p_vaddr = em->section[SECT_DATA].vaddr;
+	header.data.p_paddr = em->section[SECT_DATA].vaddr;
+	header.data.p_filesz = em->section[SECT_DATA].pos;
+	header.data.p_memsz = em->section[SECT_DATA].pos;
 	header.text.p_align = 4;
 }
 */
-
-int labels_add(labels *l, string key, uint32_t val) {
-	size_t old_sz = cc_size(&l->map);
-	label nu;
-	nu.val = val;
-	label *e = cc_get_or_insert(&l->map, key, nu);
-	if (!e)
-		panic(no_mem);
-	if (cc_size(&l->map) != old_sz)
-		return 0; // inserted new label with val
-	if (e->val >= 0)
-		return -1; // that's a duplicate label
-	e->val = val;
-	// resolve each waiter
-	cc_for_each(&e->waiters, waiter) {
-		// TODO: set imm in the label_waiter
-		// this will mean defining functions to set U-/J-type immediates
-		// it also needs a way to get the u32 holding the instruction
-	}
-	cc_cleanup(&e->waiters);
-	return 0;
-}
-
-int64_t label_get_or_add_waiter(labels *l, uint32_t *wait_dst, enum assign_type wait_assign) {
-	// TODO
-	(void) l;
-	(void) wait_dst;
-	(void) wait_assign;
-	return 0;
-}
-
