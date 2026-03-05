@@ -1,5 +1,12 @@
 #include <assert.h>
 #include <elf.h>
+#include <limits.h>
+#include <string.h>
+#define _GNU_SOURCE
+// TODO: why do I have to define __USE_GNU?! I want copy_file_range, and the
+// man pages say I get that with just _GNU_SOURCE and the file offset thing
+#define __USE_GNU
+#define _FILE_OFFSET_BITS 64
 #include <unistd.h>
 
 #include "emitter.h"
@@ -126,13 +133,17 @@ int64_t emitter_label_get_or_add_waiter(emitter *em, string key, enum assign_typ
 	return e->val;
 }
 
-/*
-void emitter_output_elf(emitter *em, int dst) {
+int emitter_output_elf(emitter *em, int dst) {
+	// TODO: this does not work on a big endian machine
+	// (it should emit a little-endian executable, but it should still work)
 	struct {
 		Elf64_Ehdr ehdr;
 		Elf64_Phdr text;
 		Elf64_Phdr data;
 	} header;
+	const size_t after = sizeof header * (CHAR_BIT / 8);
+	bzero(&header, sizeof header);
+
 	header.ehdr.e_ident[EI_MAG0] = 0x7f;
 	header.ehdr.e_ident[EI_MAG1] = 'E';
 	header.ehdr.e_ident[EI_MAG2] = 'L';
@@ -146,20 +157,30 @@ void emitter_output_elf(emitter *em, int dst) {
 	header.ehdr.e_type = ET_EXEC;
 	header.ehdr.e_machine = EM_RISCV; // now we're getting somewhere
 	header.ehdr.e_version = EV_CURRENT;
-	// TODO: lookup _start label, and add that to hdr.e_entry
-	header.ehdr.e_entry = em->section[SECT_TEXT].vaddr;
+	const string start_label = {
+		.begin = "_start",
+		.len = 6
+	};
+	label *start = cc_get(&em->labels, start_label);
+	if (start) {
+		// bad things will happen if _start was defined outside of .text
+		header.ehdr.e_entry = start->val;
+	} else {
+		header.ehdr.e_entry = em->section[SECT_TEXT].vaddr;
+	}
 	header.ehdr.e_phoff = 0x40; // right after the elf header
 	header.ehdr.e_shoff = 0;
 	header.ehdr.e_flags = 0;
 	header.ehdr.e_ehsize = 64;
-	header.ehdr.e_phentsize = 0;
+	header.ehdr.e_phentsize = 0x40; // TODO: verify
 	header.ehdr.e_phnum = 2; // TODO: verify
-	header.ehdr.e_shentsize = 0x40; // TODO: verify
+	header.ehdr.e_shentsize = 0;
 	header.ehdr.e_shnum = 0;
-	header.ehdr.e_shstrndx 0;
+	header.ehdr.e_shstrndx = 0;
 
 	header.text.p_type = PT_LOAD;
 	header.text.p_flags = PF_X | PF_R;
+	header.text.p_offset = after;
 	header.text.p_vaddr = em->section[SECT_TEXT].vaddr;
 	header.text.p_paddr = em->section[SECT_TEXT].vaddr; // likely unused
 	header.text.p_filesz = em->section[SECT_TEXT].pos;
@@ -168,10 +189,23 @@ void emitter_output_elf(emitter *em, int dst) {
 
 	header.data.p_type = PT_LOAD;
 	header.data.p_flags = PF_R | PF_W;
+	header.data.p_offset = after + em->section[SECT_TEXT].pos;
 	header.data.p_vaddr = em->section[SECT_DATA].vaddr;
 	header.data.p_paddr = em->section[SECT_DATA].vaddr;
 	header.data.p_filesz = em->section[SECT_DATA].pos;
 	header.data.p_memsz = em->section[SECT_DATA].pos;
-	header.text.p_align = 4;
+	header.data.p_align = 4;
+
+	ssize_t text_m = em->section[SECT_TEXT].len;
+	ssize_t data_m = em->section[SECT_DATA].len;
+	ssize_t text_d = em->section[SECT_TEXT].pos - text_m;
+	ssize_t data_d = em->section[SECT_DATA].pos - data_m;
+	off_t zero = 0;
+	return (
+		write(dst, &header, sizeof header) != sizeof header
+		|| copy_file_range(em->section[SECT_TEXT].swap, &zero, dst, NULL, text_d, 0) != text_d
+		|| write(dst, em->section_buf[SECT_TEXT], text_m) != text_m
+		|| copy_file_range(em->section[SECT_DATA].swap, &zero, dst, NULL, data_d, 0) != data_d
+		|| write(dst, em->section_buf[SECT_DATA], data_m) != data_m
+	);
 }
-*/

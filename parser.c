@@ -538,7 +538,8 @@ char *parse_line(char **_s, emitter *em) {
 				break;
 			default:
 				// default should never occur
-				printf("error: invalid format buffer\n");
+				// if it does, somehow, the global trie is
+				// messed up (or a instruction info buffer)
 				assert(0);
 			}
 			emitter_buffer(em, &instr, sizeof instr);
@@ -563,7 +564,7 @@ char *parse_line(char **_s, emitter *em) {
 		lstr.len == 0
 		|| expect_char_literal(&s, ':')
 	)
-		return "could not parse as label";
+		return "unknown operation/directive";
 	if (emitter_label_add(em, lstr))
 		return "label redefined";
 	// TODO: do stuff with id_start and id_end
@@ -577,13 +578,3 @@ out_check_line:
 	*_s = s;
 	return NULL;
 }
-
-/*
-void assemble(char *input, size_t len, int dst_fd) {
-	char *pos = input;
-	while (pos < input + len) {
-		char *err = parse_line(&pos);
-		// TODO
-	}
-}
-*/

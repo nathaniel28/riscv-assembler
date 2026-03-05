@@ -67,4 +67,6 @@ extern int emitter_label_add(emitter *em, string key);
 
 extern int64_t emitter_label_get_or_add_waiter(emitter *em, string key, enum assign_type wait_assign);
 
+extern int emitter_output_elf(emitter *em, int dst);
+
 #endif
