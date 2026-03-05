@@ -221,20 +221,6 @@ int test_parse_line() {
 			printf("failed test %ld (%s): at offset %lu, expect\n%08x (%032b), got\n%08x (%032b)\n", i, T[i].in, diff_idx, want, want, got, got);
 			return 1;
 		}
-		// TODO: my own u32 compare
-		/*
-		if (memcmp(em.section_buf[em.current_section], T[i].res, T[i].sz)) {
-			printf("failed test %ld (%s)", i, T[i].in);
-			if (T[i].sz == sizeof(uint32_t)) {
-				uint32_t want, got;
-				memcpy(&want, T[i].res, sizeof want);
-				memcpy(&got, em.section_buf[em.current_section], sizeof got);
-				printf(": expect\n%032b, got\n%032b", want, got);
-			}
-			printf("\n");
-			return 1;
-		}
-		*/
 skip_compare:
 	}
 	cc_cleanup(&em.labels);
