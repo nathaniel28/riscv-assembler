@@ -172,8 +172,8 @@ int emitter_output_elf(emitter *em, int dst) {
 	header.ehdr.e_shoff = 0;
 	header.ehdr.e_flags = 0;
 	header.ehdr.e_ehsize = 64;
-	header.ehdr.e_phentsize = 0x40; // TODO: verify
-	header.ehdr.e_phnum = 2; // TODO: verify
+	header.ehdr.e_phentsize = 0x38;
+	header.ehdr.e_phnum = 2;
 	header.ehdr.e_shentsize = 0;
 	header.ehdr.e_shnum = 0;
 	header.ehdr.e_shstrndx = 0;
