@@ -16,9 +16,8 @@ enum assign_type {
 };
 
 typedef struct {
-	int64_t fix_idx; // offset into text section of instruction
-			 // that needs the immediate
-	int section;
+	int64_t fix_idx; // offset into section
+	int section; // section, to figure out vaddr
 	enum assign_type assign;
 } label_waiter;
 
@@ -27,26 +26,24 @@ typedef struct {
 	int64_t val; // negative if unassigned (meaning there are waiters)
 } label;
 
-#define CC_DTOR label, { if (val.val < 0) cc_cleanup(&val.waiters); }
-#define CC_CMPR string, { return val_1.len != val_2.len || strncmp(val_1.begin, val_2.begin, val_1.len); }
-#define CC_HASH string, { return cc_wyhash(val.begin, val.len); }
-#include "cc.h"
-
-typedef struct {
-	cc_map(string, label) map;
-} labels;
-
 enum section {
 	SECT_TEXT,
 	SECT_DATA,
 	N_SECTIONS,
 };
 
+#define CC_DTOR label, { if (val.val < 0) cc_cleanup(&val.waiters); }
+#define CC_CMPR string, { return val_1.len != val_2.len || strncmp(val_1.begin, val_2.begin, val_1.len); }
+#define CC_HASH string, { return cc_wyhash(val.begin, val.len); }
+#include "cc.h"
+
 // the goal of an emitter is to store data in seperate places for all sections
 // (currently .text or .data) because since the program being assembled need
 // not list the sections in the "correct" order, or may swap between the same
 // sections more than once, all the assembled instructions/data needs to be
 // buffered
+// it also keeps track of labels, both ones that exist and ones that should
+// exist in the future
 typedef struct {
 	uint8_t section_buf[N_SECTIONS][4096];
 	struct {
@@ -55,7 +52,7 @@ typedef struct {
 		uint64_t pos; // relative to the first byte ever written
 		int swap; // fd of file buffer
 	} section[N_SECTIONS];
-	labels labels;
+	cc_map(string, label) labels;
 	int current_section;
 } emitter;
 

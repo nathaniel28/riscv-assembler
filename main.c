@@ -6,14 +6,29 @@
 #include "emitter.h"
 #include "parser.h"
 
+// regular slow bytewise compare
+// this is needed since memcmp doesn't return the index of the discrepancy
+size_t compare(void *_a, void *_b, size_t len) {
+	uint8_t *a = _a;
+	uint8_t *b = _b;
+	size_t pos = 0;
+	while (pos < len) {
+		if (a[pos] != b[pos])
+			return pos;
+		pos++;
+	}
+	return pos;
+}
+
 int test_parse_line() {
 	struct {
 		char *in;
 		void *res;
 		size_t sz;
+		int times;
 		_Bool ok;
 	} T[] = {
-#define U(in, u32) { in "\n", (uint32_t []) { u32 }, sizeof(uint32_t), 1 }
+#define U(in, u32) { in "\n", (uint32_t []) { u32 }, sizeof(uint32_t), 1, 1 }
 		U(" \t\t add \t  x0   ,\t  x1  \t,   x2  ", 0x00208033),
 		U("add x0,x1,x2", 0x00208033),
 		U("add x0, x1, x2", 0x00208033),
@@ -59,7 +74,7 @@ int test_parse_line() {
 		U("bltu x21, x31, alt12", 0xcdfae6e3),
 		U("bgeu x21, x31, big12", 0xfffaffe3),
 #undef U
-#define U(in) { in "\n", NULL, 0, 0 }
+#define U(in) { in "\n", NULL, 0, 1, 0 }
 		U(""),
 		U("addi x0, x0, -2049"),
 		U("addi x0, x0, 2048"),
@@ -75,7 +90,7 @@ int test_parse_line() {
 		U("a x0, x0, x0"),
 		U("add x0, x0, x0 add x0, x0, x0"),
 #undef U
-#define U(in, ...) { in "\n", __VA_ARGS__, sizeof(__VA_ARGS__), 1 }
+#define U(in, ...) { in "\n", __VA_ARGS__, sizeof(__VA_ARGS__), 1, 1 }
 		U(".ascii \"~!@#$%^&*()_+`-=[]{}|;':,./<>?\\\\\\\"\\b\\f\\n\\r\\tabcdefghijklmnopqrstuvwxyz\"", (char []) {126, 33, 64, 35, 36, 37, 94, 38, 42, 40, 41, 95, 43, 96, 45, 61, 91, 93, 123, 125, 124, 59, 39, 58, 44, 46, 47, 60, 62, 63, 92, 34, 8, 12, 10, 13, 9, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122}),
 		U(".byte 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14", (uint8_t []) {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}),
 		U(".byte 255", (uint8_t []) {255}),
@@ -90,9 +105,43 @@ int test_parse_line() {
 		// the above test, so I'd need to write my own number parser
 		// which isn't the end of the world but I don't want to now
 #undef U
+#define U(in, t, ...) { in "\n", __VA_ARGS__, sizeof(__VA_ARGS__), t, 1 }
+		U(
+			"before:\n"
+			"jal zero, before\n"
+			"jal zero, before\n"
+			"jal zero, before\n"
+			"jal zero, before\n"
+			"jal zero, before\n"
+			"jal zero, before\n"
+			"jal zero, before\n"
+			"jal zero, after\n"
+			"jal zero, after\n"
+			"jal zero, after\n"
+			"jal zero, after\n"
+			"jal zero, after\n"
+			"jal zero, after\n"
+			"after:", 15,
+			(uint32_t []) {
+				0x0000006f,
+				0xffdff06f,
+				0xff9ff06f,
+				0xff5ff06f,
+				0xff1ff06f,
+				0xfedff06f,
+				0xfe9ff06f,
+				0x0180006f,
+				0x0140006f,
+				0x0100006f,
+				0x00c0006f,
+				0x0080006f,
+				0x0040006f
+			}
+		),
+#undef U
 	};
 	static emitter em;
-	cc_init(&em.labels.map);
+	cc_init(&em.labels);
 	em.current_section = SECT_TEXT;
 	em.section[SECT_TEXT].vaddr = 0x00400000;
 	em.section[SECT_DATA].vaddr = 0x10010000;
@@ -142,30 +191,53 @@ int test_parse_line() {
 		em.section[SECT_DATA].len = 0;
 		em.section[SECT_DATA].pos = 0;
 		pos = T[i].in;
-		err = parse_line(&pos, &em);
-		if ((err != NULL) == T[i].ok) {
-			printf("failed test %ld (%s): fail/success mismatch, reported %s\n", i, T[i].in, err ? err : "no errors");
+		for (int j = 0; j < T[i].times; j++) {
+			if (*pos == '\0') {
+				printf("failed test %ld (%s): early input end: expect %d calls, got %d calls\n", i, T[i].in, T[i].times, j);
+				return 1;
+			}
+			err = parse_line(&pos, &em);
+			if ((err != NULL) == T[i].ok) {
+				printf("failed test %ld (%s): fail/success mismatch, reported %s after %d calls\n", i, T[i].in, err ? err : "no errors", j + 1);
+				return 1;
+			}
+			if (err)
+				goto skip_compare;
+			if (*pos++ != '\n') {
+				printf("failed test %ld (%s): bad advancement (at `%s`)\n", i, T[i].in, pos);
+				return 1;
+			}
+		}
+		size_t diff_idx = compare(em.section_buf[em.current_section], T[i].res, T[i].sz);
+		if (diff_idx < T[i].sz) {
+			diff_idx &= ~3;
+			uint32_t want, got;
+			size_t n = sizeof(uint32_t);
+			if (diff_idx + n >= T[i].sz) {
+				n = T[i].sz - diff_idx;
+			}
+			memcpy(&want, ((uint8_t *) T[i].res) + diff_idx, n);
+			memcpy(&got, em.section_buf[em.current_section] + diff_idx, n);
+			printf("failed test %ld (%s): at offset %lu, expect\n%08x (%032b), got\n%08x (%032b)\n", i, T[i].in, diff_idx, want, want, got, got);
 			return 1;
 		}
-		if (!err) {
-			if (memcmp(em.section_buf[em.current_section], T[i].res, T[i].sz)) {
-				printf("failed test %ld (%s)", i, T[i].in);
-				if (T[i].sz == sizeof(uint32_t)) {
-					uint32_t want, got;
-					memcpy(&want, T[i].res, sizeof want);
-					memcpy(&got, em.section_buf[em.current_section], sizeof got);
-					printf(": expect\n%032b, got\n%032b", want, got);
-				}
-				printf("\n");
-				return 1;
+		// TODO: my own u32 compare
+		/*
+		if (memcmp(em.section_buf[em.current_section], T[i].res, T[i].sz)) {
+			printf("failed test %ld (%s)", i, T[i].in);
+			if (T[i].sz == sizeof(uint32_t)) {
+				uint32_t want, got;
+				memcpy(&want, T[i].res, sizeof want);
+				memcpy(&got, em.section_buf[em.current_section], sizeof got);
+				printf(": expect\n%032b, got\n%032b", want, got);
 			}
-			if (T[i].ok && *pos != '\n') {
-				printf("failed test %ld (%s): bad advancement (%s)\n", i, T[i].in, pos);
-				return 1;
-			}
+			printf("\n");
+			return 1;
 		}
+		*/
+skip_compare:
 	}
-	cc_cleanup(&em.labels.map);
+	cc_cleanup(&em.labels);
 	return 0;
 }
 

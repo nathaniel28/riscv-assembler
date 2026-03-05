@@ -55,13 +55,13 @@ void emitter_advance(emitter *em, size_t len) {
 }
 
 int emitter_label_add(emitter *em, string key) {
-	size_t old_sz = cc_size(&em->labels.map);
+	size_t old_sz = cc_size(&em->labels);
 	label nu;
 	nu.val = em->section[em->current_section].pos + em->section[em->current_section].vaddr;
-	label *e = cc_get_or_insert(&em->labels.map, key, nu);
+	label *e = cc_get_or_insert(&em->labels, key, nu);
 	if (!e)
 		panic(no_mem);
-	if (cc_size(&em->labels.map) != old_sz)
+	if (cc_size(&em->labels) != old_sz)
 		return 0; // inserted new label with val
 	if (e->val >= 0)
 		return -1; // that's a duplicate label
@@ -85,13 +85,13 @@ int emitter_label_add(emitter *em, string key) {
 				// TODO: verify the immediate fits in b-type
 				// immediate field, but take care to allow
 				// negative values
-				set_btype_imm(&instr, offset << 1);
+				set_btype_imm(&instr, offset);
 				break;
 			case ASSIGN_JTYPE:
 				// TODO: verify the immediate fits in j-type
 				// immediate field, but take care to allow
 				// negative values
-				set_jtype_imm(&instr, offset << 1);
+				set_jtype_imm(&instr, offset);
 				break;
 			default:
 				// should never occur
@@ -110,7 +110,7 @@ int64_t emitter_label_get_or_add_waiter(emitter *em, string key, enum assign_typ
 	label nu;
 	nu.val = -1;
 	cc_init(&nu.waiters);
-	label *e = cc_get_or_insert(&em->labels.map, key, nu);
+	label *e = cc_get_or_insert(&em->labels, key, nu);
 	if (!e)
 		panic(no_mem);
 	if (e->val < 0) {
