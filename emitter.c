@@ -142,6 +142,7 @@ int emitter_output_elf(emitter *em, int dst) {
 		Elf64_Phdr data;
 	} header;
 	const size_t after = sizeof header * (CHAR_BIT / 8);
+	const size_t pagesize = 0x1000;
 	bzero(&header, sizeof header);
 
 	header.ehdr.e_ident[EI_MAG0] = 0x7f;
@@ -168,6 +169,7 @@ int emitter_output_elf(emitter *em, int dst) {
 	} else {
 		header.ehdr.e_entry = em->section[SECT_TEXT].vaddr;
 	}
+	header.ehdr.e_entry += after;
 	header.ehdr.e_phoff = 0x40; // right after the elf header
 	header.ehdr.e_shoff = 0;
 	header.ehdr.e_flags = 0;
@@ -180,13 +182,16 @@ int emitter_output_elf(emitter *em, int dst) {
 
 	header.text.p_type = PT_LOAD;
 	header.text.p_flags = PF_X | PF_R;
-	header.text.p_offset = after;
+	header.text.p_offset = 0;
 	header.text.p_vaddr = em->section[SECT_TEXT].vaddr;
-	header.text.p_paddr = em->section[SECT_TEXT].vaddr; // likely unused
+	header.text.p_paddr = em->section[SECT_TEXT].vaddr;
 	header.text.p_filesz = em->section[SECT_TEXT].pos;
 	header.text.p_memsz = em->section[SECT_TEXT].pos;
-	header.text.p_align = 4;
+	header.text.p_align = pagesize;
 
+	/*
+	// TODO: this section probably will get rejected
+	// for a bad offset (likely not page aligned)
 	header.data.p_type = PT_LOAD;
 	header.data.p_flags = PF_R | PF_W;
 	header.data.p_offset = after + em->section[SECT_TEXT].pos;
@@ -194,7 +199,8 @@ int emitter_output_elf(emitter *em, int dst) {
 	header.data.p_paddr = em->section[SECT_DATA].vaddr;
 	header.data.p_filesz = em->section[SECT_DATA].pos;
 	header.data.p_memsz = em->section[SECT_DATA].pos;
-	header.data.p_align = 4;
+	header.data.p_align = pagesize;
+	*/
 
 	ssize_t text_m = em->section[SECT_TEXT].len;
 	ssize_t data_m = em->section[SECT_DATA].len;
