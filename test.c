@@ -75,14 +75,12 @@ int test_parse_line() {
 		U("bgeu x21, x31, big12", 0xfffaffe3),
 #undef U
 #define U(in) { in "\n", NULL, 0, 1, 0 }
-		U(""),
 		U("addi x0, x0, -2049"),
 		U("addi x0, x0, 2048"),
 		U("lb t0, 2048(t0)"),
 		U("lh t0, -2049(t0)"),
 		U("slli x0, x0, -1"),
 		U("srai x0, x0, 32"),
-		U("\n"),
 		U("and"),
 		U("and x99, x0, x0"),
 		U("and x0, x0"),
@@ -136,6 +134,16 @@ int test_parse_line() {
 				0x00c0006f,
 				0x0080006f,
 				0x0040006f
+			}
+		),
+		U(
+			"add x0, x1, x2\r\n"
+			"add x0, x1, x2\r\n"
+			"add x0, x1, x2\r", 3,
+			(uint32_t []) {
+				0x00208033,
+				0x00208033,
+				0x00208033
 			}
 		),
 #undef U

@@ -30,6 +30,10 @@ int main(int argc, char **argv) {
 		return 1;
 	}
 
+	// TODO: write to a temporary file then link that to the expected
+	// output location because calls to lseek that expand the file must
+	// pad with zeros and that might not happen if the file exists and has
+	// data up to the seek
 	int output_fd = open(output_file, O_WRONLY | O_CREAT/* | O_EXCL*/, 0755);
 	if (output_fd == -1) {
 		printf("Failed to open %s: %s\n", output_file, strerror(errno));

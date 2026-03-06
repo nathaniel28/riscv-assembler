@@ -9,11 +9,7 @@
 #include "trie.h"
 
 int whitespace(char c) {
-	return c == ' ' || c == '\t';
-}
-
-int newline(char c) {
-	return c == '\n' || c == '\r';
+	return c == ' ' || c == '\t' || c == '\r';
 }
 
 int identifier(char c) {
@@ -361,6 +357,9 @@ char *parse_line(char **_s, emitter *em) {
 	char *err;
 
 	skip_whitespace(&s);
+	if (*s == '\n')
+		return NULL;
+
 	char *rewind = s; // go back here to parse as another kind of line
 
 	string lstr;
@@ -572,7 +571,7 @@ char *parse_line(char **_s, emitter *em) {
 
 out_check_line:
 	skip_whitespace(&s);
-	if (!newline(*s) && *s != '\0')
+	if (*s != '\n' && *s != '\0')
 		return "extra tokens";
 
 	*_s = s;

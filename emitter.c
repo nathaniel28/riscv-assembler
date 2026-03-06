@@ -2,6 +2,7 @@
 #include <elf.h>
 #include <limits.h>
 #include <string.h>
+#include <sys/param.h>
 #define _GNU_SOURCE
 // TODO: why do I have to define __USE_GNU?! I want copy_file_range, and the
 // man pages say I get that with just _GNU_SOURCE and the file offset thing
@@ -133,17 +134,61 @@ int64_t emitter_label_get_or_add_waiter(emitter *em, string key, enum assign_typ
 	return e->val;
 }
 
+int emit_section(emitter *em, int dst, int sect) {
+	int l = em->section[sect].len;
+	int m = em->section[sect].pos - l;
+	off_t zero = 0;
+	return (
+		copy_file_range(em->section[sect].swap, &zero, dst, NULL, m, 0) != m
+		|| write(dst, em->section_buf[sect], l) != l
+	);
+}
+
+#define BYTESIZE(x) (sizeof(x) * (CHAR_BIT / 8))
+
 int emitter_output_elf(emitter *em, int dst) {
 	// TODO: this does not work on a big endian machine
 	// (it should emit a little-endian executable, but it should still work)
+	// TODO: this probably relies on CHAR_BIT being 8 despite the effort
+	// to be independent of this
+	// NOTE: actually, it definitely does rely on this, since the
+	// emitter increments its pos and len by sizeof but relies on
+	// this being in bytes
 	struct {
 		Elf64_Ehdr ehdr;
 		Elf64_Phdr text;
 		Elf64_Phdr data;
 	} header;
-	const size_t after = sizeof header * (CHAR_BIT / 8);
-	const size_t pagesize = 0x1000;
 	bzero(&header, sizeof header);
+
+	const size_t pagesize = 0x1000;
+	ssize_t after = BYTESIZE(header.ehdr) + BYTESIZE(header.text);
+
+	header.ehdr.e_phnum = 1;
+	header.text.p_type = PT_LOAD;
+	header.text.p_flags = PF_X | PF_R;
+	// map from 0 because it's page aligned
+	// this wraps in the elf/program headers
+	// so adjust the entry point to compensate
+	header.text.p_offset = 0;
+	header.text.p_vaddr = em->section[SECT_TEXT].vaddr;
+	header.text.p_paddr = em->section[SECT_TEXT].vaddr;
+	header.text.p_filesz = em->section[SECT_TEXT].pos;
+	header.text.p_memsz = em->section[SECT_TEXT].pos;
+	header.text.p_align = pagesize;
+
+	if (em->section[SECT_DATA].pos > 0) {
+		after += BYTESIZE(header.data);
+		header.ehdr.e_phnum++;
+		header.data.p_type = PT_LOAD;
+		header.data.p_flags = PF_R | PF_W;
+		header.data.p_offset = roundup(header.text.p_filesz + header.text.p_offset, pagesize);
+		header.data.p_vaddr = em->section[SECT_DATA].vaddr;
+		header.data.p_paddr = em->section[SECT_DATA].vaddr;
+		header.data.p_filesz = em->section[SECT_DATA].pos;
+		header.data.p_memsz = em->section[SECT_DATA].pos;
+		header.data.p_align = pagesize;
+	}
 
 	header.ehdr.e_ident[EI_MAG0] = 0x7f;
 	header.ehdr.e_ident[EI_MAG1] = 'E';
@@ -152,11 +197,11 @@ int emitter_output_elf(emitter *em, int dst) {
 	header.ehdr.e_ident[EI_CLASS] = ELFCLASS64;
 	header.ehdr.e_ident[EI_DATA] = ELFDATA2LSB;
 	header.ehdr.e_ident[EI_VERSION] = EV_CURRENT;
-	header.ehdr.e_ident[EI_OSABI] = ELFOSABI_SYSV; // gcc uses this for me
+	header.ehdr.e_ident[EI_OSABI] = ELFOSABI_SYSV;
 	header.ehdr.e_ident[EI_ABIVERSION] = 0;
-	header.ehdr.e_ident[EI_PAD] = 0; // unused padding
+	header.ehdr.e_ident[EI_PAD] = 0;
 	header.ehdr.e_type = ET_EXEC;
-	header.ehdr.e_machine = EM_RISCV; // now we're getting somewhere
+	header.ehdr.e_machine = EM_RISCV;
 	header.ehdr.e_version = EV_CURRENT;
 	const string start_label = {
 		.begin = "_start",
@@ -170,48 +215,26 @@ int emitter_output_elf(emitter *em, int dst) {
 		header.ehdr.e_entry = em->section[SECT_TEXT].vaddr;
 	}
 	header.ehdr.e_entry += after;
-	header.ehdr.e_phoff = 0x40; // right after the elf header
+	header.ehdr.e_phoff = 0x40; // program headers come after the elf header
 	header.ehdr.e_shoff = 0;
 	header.ehdr.e_flags = 0;
 	header.ehdr.e_ehsize = 64;
 	header.ehdr.e_phentsize = 0x38;
-	header.ehdr.e_phnum = 2;
+	//header.ehdr.e_phnum set earlier
 	header.ehdr.e_shentsize = 0;
 	header.ehdr.e_shnum = 0;
 	header.ehdr.e_shstrndx = 0;
 
-	header.text.p_type = PT_LOAD;
-	header.text.p_flags = PF_X | PF_R;
-	header.text.p_offset = 0;
-	header.text.p_vaddr = em->section[SECT_TEXT].vaddr;
-	header.text.p_paddr = em->section[SECT_TEXT].vaddr;
-	header.text.p_filesz = em->section[SECT_TEXT].pos;
-	header.text.p_memsz = em->section[SECT_TEXT].pos;
-	header.text.p_align = pagesize;
-
-	/*
-	// TODO: this section probably will get rejected
-	// for a bad offset (likely not page aligned)
-	header.data.p_type = PT_LOAD;
-	header.data.p_flags = PF_R | PF_W;
-	header.data.p_offset = after + em->section[SECT_TEXT].pos;
-	header.data.p_vaddr = em->section[SECT_DATA].vaddr;
-	header.data.p_paddr = em->section[SECT_DATA].vaddr;
-	header.data.p_filesz = em->section[SECT_DATA].pos;
-	header.data.p_memsz = em->section[SECT_DATA].pos;
-	header.data.p_align = pagesize;
-	*/
-
-	ssize_t text_m = em->section[SECT_TEXT].len;
-	ssize_t data_m = em->section[SECT_DATA].len;
-	ssize_t text_d = em->section[SECT_TEXT].pos - text_m;
-	ssize_t data_d = em->section[SECT_DATA].pos - data_m;
-	off_t zero = 0;
-	return (
-		write(dst, &header, sizeof header) != sizeof header
-		|| copy_file_range(em->section[SECT_TEXT].swap, &zero, dst, NULL, text_d, 0) != text_d
-		|| write(dst, em->section_buf[SECT_TEXT], text_m) != text_m
-		|| copy_file_range(em->section[SECT_DATA].swap, &zero, dst, NULL, data_d, 0) != data_d
-		|| write(dst, em->section_buf[SECT_DATA], data_m) != data_m
-	);
+	if (
+		write(dst, &header, after) != after
+		|| emit_section(em, dst, SECT_TEXT)
+	)
+		return 1;
+	if (em->section[SECT_DATA].pos > 0) {
+		return (
+			lseek(dst, header.data.p_offset, SEEK_SET) == (off_t) -1
+			|| emit_section(em, dst, SECT_DATA)
+		);
+	}
+	return 0;
 }
